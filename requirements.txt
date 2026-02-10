@@ -1,1 +1,7 @@
-
+google-genai==0.2.2
+supabase==2.3.4
+requests==2.31.0
+beautifulsoup4==4.12.3
+feedparser==6.0.11
+python-telegram-bot==20.8
+lxml==5.1.0
