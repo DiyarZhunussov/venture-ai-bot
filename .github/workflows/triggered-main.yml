@@ -1,0 +1,15 @@
+name: Main Bot (triggered)
+
+on:
+  workflow_dispatch:           # ручной запуск
+  schedule:
+    - cron: '0 3 * * *'       # оставьте, если хотите дублирование
+    - cron: '0 12 * * *'
+  repository_dispatch:         # ← это важно!
+    types: [cron-trigger]      # можно любое имя, например "daily-news"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      # ... все ваши шаги как раньше
