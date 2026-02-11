@@ -11,7 +11,7 @@ import re
 import feedparser
 import random
 from datetime import datetime, timedelta
-from google import genai
+import google.generativeai as genai
 from supabase import create_client
 from bs4 import BeautifulSoup
 import time
