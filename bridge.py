@@ -28,7 +28,7 @@ if not all([GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SUPABASE_URL, 
 # INITIALIZATION
 # ────────────────────────────────────────────────
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')  # or 'gemini-1.5-pro', 'gemini-2.0-flash' etc.
+model = genai.GenerativeModel('gemini-3.0-flash-preview')  # or 'gemini-1.5-pro', 'gemini-2.0-flash' etc.
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
