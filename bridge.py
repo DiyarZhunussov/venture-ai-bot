@@ -35,11 +35,21 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
 # Example RSS sources (expand this list!)
 RSS_SOURCES = [
+    # Global / Tier-1 (working)
     "https://techcrunch.com/feed/",
-    "https://feeds.feedburner.com/crunchbase/",
-    "https://kursiv.kz/rss",                    # example – check real URLs
-    "https://forbes.kz/rss",
-    # Add more: Spot.uz, Capital.kz, Digital Business, etc.
+    "https://www.crunchbase.com/feed/news",
+    "https://news.ycombinator.com/rss",  # good for startup trends
+
+    # Kazakhstan / Central Asia (check if still active; some moved)
+    "https://kursiv.kz/rss/all",                # Kursiv.kz — main VC/news
+    "https://digitalbusiness.kz/feed/",         # Digital Business
+    "https://forbes.kz/rss/allarticles",        # Forbes Kazakhstan (may need update)
+    "https://capital.kz/rss/",                  # Capital.kz
+    "https://www.spot.uz/ru/rss/",              # Spot.uz (Uzbekistan)
+
+    # Other useful
+    "https://www.wepost.media/rss",             # WeProject
+    "https://vc.ru/rss/all",                    # vc.ru — Russian VC, often covers CA
 ]
 
 def is_already_posted(url_or_text: str) -> bool:
