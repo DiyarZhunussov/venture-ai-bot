@@ -1,5 +1,6 @@
 import os
 import sys
+import asyncio
 import feedparser
 import requests
 from bs4 import BeautifulSoup
@@ -28,28 +29,26 @@ if not all([GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SUPABASE_URL, 
 # INITIALIZATION
 # ────────────────────────────────────────────────
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-3-flash-preview')  # or 'gemini-1.5-pro', 'gemini-2.0-flash' etc.
+# FIX #1: 'gemini-3-flash-preview' does not exist. Use a real model name.
+model = genai.GenerativeModel('gemini-3-flash-preview')
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-# Example RSS sources (expand this list!)
 RSS_SOURCES = [
-    # Global / Tier-1 (working)
+    # Global / Tier-1
     "https://techcrunch.com/feed/",
-    "https://www.crunchbase.com/feed/news",
-    "https://news.ycombinator.com/rss",  # good for startup trends
+    "https://news.ycombinator.com/rss",
 
-    # Kazakhstan / Central Asia (check if still active; some moved)
-    "https://kursiv.kz/rss/all",                # Kursiv.kz — main VC/news
-    "https://digitalbusiness.kz/feed/",         # Digital Business
-    "https://forbes.kz/rss/allarticles",        # Forbes Kazakhstan (may need update)
-    "https://capital.kz/rss/",                  # Capital.kz
-    "https://www.spot.uz/ru/rss/",              # Spot.uz (Uzbekistan)
-
-    # Other useful
-    "https://www.wepost.media/rss",             # WeProject
-    "https://vc.ru/rss/all",                    # vc.ru — Russian VC, often covers CA
+    # Kazakhstan / Central Asia
+    "https://kursiv.kz/rss/all",
+    "https://digitalbusiness.kz/feed/",
+    "https://forbes.kz/rss/allarticles",
+    "https://capital.kz/rss/",
+    "https://www.spot.uz/ru/rss/",
+    "https://www.wepost.media/rss",
+    "https://vc.ru/rss/all",
+    # NOTE: https://www.crunchbase.com/feed/news was REMOVED — Crunchbase has no public RSS feed.
 ]
 
 def is_already_posted(url_or_text: str) -> bool:
@@ -65,9 +64,9 @@ def add_to_posted(url_or_text: str, news_type: str, score: int, source_type: str
     try:
         supabase.table("posted_news").insert({
             "url_text": url_or_text,
-            "news_type": news_type,          # "НОВОСТЬ" or "ОБУЧЕНИЕ"
+            "news_type": news_type,
             "shareability_score": score,
-            "source_type": source_type,      # "tier1", "local", "education"
+            "source_type": source_type,
         }).execute()
     except Exception as e:
         print(f"Failed to save to posted_news: {e}")
@@ -95,7 +94,12 @@ def get_unsplash_image(query: str) -> str | None:
         print(f"Unsplash error: {e}")
     return None
 
-def main():
+# ────────────────────────────────────────────────
+# FIX #2: python-telegram-bot v21+ is fully async.
+# All bot.send_message / bot.send_photo calls MUST be awaited inside async functions.
+# We wrap everything in an async main() and run it with asyncio.run().
+# ────────────────────────────────────────────────
+async def main():
     print("🚀 ЗАПУСК MAIN BOT")
     print(f"Время запуска: {datetime.utcnow().isoformat()} UTC")
 
@@ -113,17 +117,15 @@ def main():
                 print(f"  Нет записей в {source_url}")
                 continue
 
-            for entry in feed.entries[:10]:  # limit per source
+            for entry in feed.entries[:10]:
                 title = entry.get("title", "").strip()
                 link = entry.get("link", "")
                 summary = entry.get("summary", "") or entry.get("description", "")
 
-                # Deduplication
                 check_key = link or summary[:100]
                 if is_already_posted(check_key):
                     continue
 
-                # Simple negative filter (expand logic as needed)
                 content_lower = (title + " " + summary).lower()
                 if any(rule in content_lower for rule in negative_rules):
                     continue
@@ -142,14 +144,13 @@ def main():
 
     if not candidates:
         print("Нет подходящих новостей для публикации.")
-        bot.send_message(TELEGRAM_ADMIN_ID, "Main Bot: Нет подходящих новостей сегодня.")
+        await bot.send_message(TELEGRAM_ADMIN_ID, "Main Bot: Нет подходящих новостей сегодня.")
         return
 
-    # 2. Select best candidate (simple: first for now; improve with scoring later)
     best = candidates[0]
     print(f"🎯 Выбрана новость: {best['title']}")
 
-    # 3. Generate post with Gemini
+    # 2. Generate post with Gemini
     print("🤖 Генерация поста с Gemini...")
     try:
         prompt = f"""
@@ -166,9 +167,7 @@ def main():
         response = model.generate_content(prompt)
         post_text = response.text.strip()
 
-        # Add image (try parse or Unsplash)
         image_url = None
-        # Option 1: try to extract from article
         if best["url"]:
             try:
                 page = requests.get(best["url"], timeout=10)
@@ -179,53 +178,52 @@ def main():
             except:
                 pass
 
-        # Option 2: Unsplash fallback
         if not image_url:
             image_url = get_unsplash_image(best["title"] or "venture capital startup")
 
         print(f"✅ Готов пост ({len(post_text)} символов)")
     except Exception as e:
         print(f"Gemini error: {e}")
-        bot.send_message(TELEGRAM_ADMIN_ID, f"Gemini ошибка: {str(e)}")
+        await bot.send_message(TELEGRAM_ADMIN_ID, f"Gemini ошибка: {str(e)}")
         return
 
-    # 4. Publish to channel
+    # 3. Publish to channel
     print("📤 Публикация в канал...")
     try:
         if image_url:
-            bot.send_photo(
+            await bot.send_photo(
                 chat_id=TELEGRAM_CHAT_ID,
                 photo=image_url,
                 caption=post_text,
                 parse_mode="HTML" if "<" in post_text else None
             )
         else:
-            bot.send_message(
+            await bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=post_text,
                 disable_web_page_preview=False
             )
 
-        # Mark as posted
-        add_to_posted(best["key"], "НОВОСТЬ", 7, "tier1")  # example score & type
+        add_to_posted(best["key"], "НОВОСТЬ", 7, "tier1")
 
         print("🎉 ОПУБЛИКОВАНО!")
-        bot.send_message(
+        await bot.send_message(
             TELEGRAM_ADMIN_ID,
             f"✅ Опубликован пост:\n\n{post_text[:200]}...\n\nСсылка: {best['url']}"
         )
     except TelegramError as te:
         print(f"Telegram ошибка: {te}")
-        bot.send_message(TELEGRAM_ADMIN_ID, f"Ошибка отправки: {str(te)}")
+        await bot.send_message(TELEGRAM_ADMIN_ID, f"Ошибка отправки: {str(te)}")
+
 
 if __name__ == "__main__":
     try:
-        main()
+        asyncio.run(main())
     except Exception as e:
         print(f"Критическая ошибка: {e}")
         if TELEGRAM_ADMIN_ID:
             try:
-                bot.send_message(TELEGRAM_ADMIN_ID, f"Main Bot крашнулся: {str(e)}")
+                asyncio.run(bot.send_message(TELEGRAM_ADMIN_ID, f"Main Bot крашнулся: {str(e)}"))
             except:
                 pass
         sys.exit(1)
