@@ -284,7 +284,8 @@ async def main():
 
     # 4a. APPROVAL MODE — first 100 posts: ask admin before publishing
     if approval_mode:
-        pending_id = save_pending_post(best, post_text, image_url)        if not pending_id:
+        pending_id = save_pending_post(best, post_text, image_url)
+        if not pending_id:
             await bot.send_message(TELEGRAM_ADMIN_ID, "❌ Не удалось сохранить пост на одобрение.")
             return
 
@@ -293,7 +294,6 @@ async def main():
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"{post_text}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔗 {best['url']}\n\n"
             f"✅ Опубликовать: /approve {pending_id}\n"
             f"❌ Отклонить:    /reject {pending_id} <причина>"
         )
