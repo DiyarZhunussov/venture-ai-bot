@@ -1,7 +1,9 @@
 import os
 import sys
+import asyncio
+import requests as http_requests
 from supabase import create_client, Client
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -14,70 +16,222 @@ from telegram.ext import (
 # ENVIRONMENT VARIABLES
 # ────────────────────────────────────────────────
 TELEGRAM_FEEDBACK_BOT_TOKEN = os.getenv("TELEGRAM_FEEDBACK_BOT_TOKEN")
-TELEGRAM_ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+TELEGRAM_BOT_TOKEN          = os.getenv("TELEGRAM_BOT_TOKEN")       # main bot — for publishing
+TELEGRAM_ADMIN_ID           = os.getenv("TELEGRAM_ADMIN_ID")
+TELEGRAM_CHAT_ID            = os.getenv("TELEGRAM_CHAT_ID")         # the channel
+SUPABASE_URL                = os.getenv("SUPABASE_URL")
+SUPABASE_KEY                = os.getenv("SUPABASE_KEY")
 
-if not all([TELEGRAM_FEEDBACK_BOT_TOKEN, TELEGRAM_ADMIN_ID, SUPABASE_URL, SUPABASE_KEY]):
+if not all([TELEGRAM_FEEDBACK_BOT_TOKEN, TELEGRAM_ADMIN_ID, SUPABASE_URL, SUPABASE_KEY,
+            TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
     print("❌ Missing required environment variables for feedback bot.")
     sys.exit(1)
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-ADMIN_ID = int(TELEGRAM_ADMIN_ID)
+ADMIN_ID         = int(TELEGRAM_ADMIN_ID)
+main_bot         = Bot(token=TELEGRAM_BOT_TOKEN)  # used to publish to channel
 
+# ────────────────────────────────────────────────
+# HELPERS
+# ────────────────────────────────────────────────
+def add_to_posted(url_or_text: str, news_type: str, score: int, source_type: str):
+    try:
+        supabase.table("posted_news").insert({
+            "url_text":           url_or_text,
+            "news_type":          news_type,
+            "shareability_score": score,
+            "source_type":        source_type,
+        }).execute()
+    except Exception as e:
+        print(f"Failed to save to posted_news: {e}")
+
+def add_negative_constraint(feedback: str):
+    try:
+        res = supabase.table("negative_constraints").insert({"feedback": feedback}).execute()
+        return res.data[0]["id"]
+    except Exception as e:
+        print(f"Failed to add negative constraint: {e}")
+        return None
+
+# ────────────────────────────────────────────────
+# /start
+# ────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Доступ запрещён.")
         return
 
     text = (
-        "👋 Добро пожаловать в бота управления анти-кейсами\n\n"
-        "Команды:\n"
+        "👋 Бот управления постами\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "ОДОБРЕНИЕ ПОСТОВ (первые 100):\n"
+        "• /approve <id> — опубликовать пост\n"
+        "• /reject <id> <причина> — отклонить и запомнить причину\n\n"
+        "АНТИ-КЕЙСЫ:\n"
         "• Просто напиши текст — добавит новый анти-кейс\n"
-        "• /list — показать все анти-кейсы\n"
-        "• /delete <id> — удалить анти-кейс по ID\n"
-        "• /stats — статистика\n\n"
-        "Отправляй анти-кейсы в свободной форме."
+        "• /list — все анти-кейсы\n"
+        "• /delete <id> — удалить анти-кейс\n\n"
+        "СТАТИСТИКА:\n"
+        "• /stats — статистика системы\n"
+        "• /pending — посмотреть посты, ожидающие одобрения\n"
+        "━━━━━━━━━━━━━━━━━━━━"
     )
     await update.message.reply_text(text)
 
-async def add_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ────────────────────────────────────────────────
+# /approve <pending_id>  — publish the post
+# ────────────────────────────────────────────────
+async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
-    feedback = update.message.text.strip()
-    if not feedback:
+    if not context.args:
+        await update.message.reply_text("Использование: /approve <id>")
+        return
+
+    pending_id = context.args[0].strip()
+
+    try:
+        res = supabase.table("pending_posts").select("*").eq("id", pending_id).execute()
+        if not res.data:
+            await update.message.reply_text("❌ Пост не найден.")
+            return
+
+        post = res.data[0]
+        if post["status"] != "pending":
+            await update.message.reply_text(f"Пост уже обработан (статус: {post['status']}).")
+            return
+
+        post_text = post["post_text"]
+        image_url = post.get("image_url", "")
+        url_key   = post.get("url") or post_text[:100]
+        region    = post.get("region", "Мир")
+
+        # Publish to channel using the main bot
+        if image_url:
+            await main_bot.send_photo(
+                chat_id=TELEGRAM_CHAT_ID,
+                photo=image_url,
+                caption=post_text,
+                parse_mode="HTML" if "<" in post_text else None
+            )
+        else:
+            await main_bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=post_text,
+                disable_web_page_preview=False
+            )
+
+        # Mark as approved in pending_posts
+        supabase.table("pending_posts").update({"status": "approved"}).eq("id", pending_id).execute()
+
+        # Record in posted_news (for dedup + count)
+        add_to_posted(url_key, "НОВОСТЬ", 8, region)
+
+        await update.message.reply_text(f"✅ Пост опубликован!\n\n{post_text[:200]}...")
+
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка публикации: {str(e)}")
+
+# ────────────────────────────────────────────────
+# /reject <pending_id> <reason>  — skip + learn
+# ────────────────────────────────────────────────
+async def reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text("Использование: /reject <id> <причина>")
+        return
+
+    pending_id = context.args[0].strip()
+    reason     = " ".join(context.args[1:]).strip() if len(context.args) > 1 else ""
+
+    try:
+        res = supabase.table("pending_posts").select("*").eq("id", pending_id).execute()
+        if not res.data:
+            await update.message.reply_text("❌ Пост не найден.")
+            return
+
+        post = res.data[0]
+        if post["status"] != "pending":
+            await update.message.reply_text(f"Пост уже обработан (статус: {post['status']}).")
+            return
+
+        # Mark as rejected
+        supabase.table("pending_posts").update({"status": "rejected"}).eq("id", pending_id).execute()
+
+        # Auto-learn: if a reason was given, save it as an anti-case
+        reply_lines = [f"❌ Пост отклонён."]
+        if reason:
+            constraint_id = add_negative_constraint(reason)
+            reply_lines.append(f"📚 Причина сохранена как анти-кейс: «{reason}»")
+            reply_lines.append(f"(ID анти-кейса: {str(constraint_id)[:8]}…)")
+        else:
+            reply_lines.append("💡 Совет: укажи причину после ID, чтобы бот запомнил её.")
+            reply_lines.append("Пример: /reject <id> новости о крипте не нужны")
+
+        await update.message.reply_text("\n".join(reply_lines))
+
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {str(e)}")
+
+# ────────────────────────────────────────────────
+# /pending  — list posts awaiting approval
+# ────────────────────────────────────────────────
+async def pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
         return
 
     try:
-        res = supabase.table("negative_constraints").insert({"feedback": feedback}).execute()
-        new_id = res.data[0]["id"]
-        await update.message.reply_text(
-            f"✅ Анти-кейс добавлен (ID: {new_id}):\n{feedback}"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка добавления: {str(e)}")
+        res = supabase.table("pending_posts").select("id, title, region, created_at, status") \
+            .eq("status", "pending").order("created_at", desc=True).execute()
 
+        if not res.data:
+            await update.message.reply_text("Нет постов, ожидающих одобрения. ✅")
+            return
+
+        lines = ["📋 Посты на одобрении:\n"]
+        for row in res.data:
+            dt     = row["created_at"].split("T")[0]
+            short_id = str(row["id"])[:8]
+            lines.append(
+                f"• [{row['region']}] {row['title'][:60]}…\n"
+                f"  ID: {short_id}… | {dt}\n"
+                f"  /approve {row['id']}\n"
+                f"  /reject {row['id']} <причина>\n"
+            )
+
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {str(e)}")
+
+# ────────────────────────────────────────────────
+# /list — show all anti-cases
+# ────────────────────────────────────────────────
 async def list_feedbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
     try:
-        res = supabase.table("negative_constraints").select("id, feedback, created_at").order("created_at", desc=True).execute()
+        res = supabase.table("negative_constraints").select("id, feedback, created_at") \
+            .order("created_at", desc=True).execute()
         if not res.data:
             await update.message.reply_text("Анти-кейсов пока нет.")
             return
 
-        lines = []
+        lines = ["📋 Анти-кейсы:\n"]
         for row in res.data:
             dt = row["created_at"].split("T")[0]
-            lines.append(f"ID: {row['id'][:8]}… | {dt} | {row['feedback'][:80]}")
+            lines.append(f"• {dt} | {row['feedback'][:80]}\n  ID: {str(row['id'])[:8]}…")
 
-        text = "Список анти-кейсов:\n\n" + "\n".join(lines)
-        await update.message.reply_text(text)
+        await update.message.reply_text("\n".join(lines))
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {str(e)}")
 
+# ────────────────────────────────────────────────
+# /delete <id>
+# ────────────────────────────────────────────────
 async def delete_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -90,42 +244,76 @@ async def delete_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         res = supabase.table("negative_constraints").delete().eq("id", feedback_id).execute()
         if res.data:
-            await update.message.reply_text(f"🗑️ Анти-кейс удалён (ID: {feedback_id})")
+            await update.message.reply_text(f"🗑️ Анти-кейс удалён.")
         else:
             await update.message.reply_text("Не найден анти-кейс с таким ID.")
     except Exception as e:
         await update.message.reply_text(f"Ошибка удаления: {str(e)}")
 
+# ────────────────────────────────────────────────
+# /stats
+# ────────────────────────────────────────────────
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
     try:
-        posted = supabase.table("posted_news").select("count", count="exact").execute()
+        posted    = supabase.table("posted_news").select("count", count="exact").execute()
         negatives = supabase.table("negative_constraints").select("count", count="exact").execute()
-        entities = supabase.table("tracked_entities").select("count", count="exact").execute()
+        pending_r = supabase.table("pending_posts").select("count", count="exact").eq("status", "pending").execute()
+        approved  = supabase.table("pending_posts").select("count", count="exact").eq("status", "approved").execute()
+        rejected  = supabase.table("pending_posts").select("count", count="exact").eq("status", "rejected").execute()
+
+        mode = "ОДОБРЕНИЕ (первые 100)" if (posted.count or 0) < 100 else "АВТОМАТ"
 
         text = (
-            "📊 Статистика:\n\n"
-            f"Опубликовано постов: {posted.count}\n"
-            f"Анти-кейсов: {negatives.count}\n"
-            f"Отслеживаемых компаний/фондов: {entities.count}"
+            f"📊 Статистика:\n\n"
+            f"Режим: {mode}\n"
+            f"Опубликовано постов: {posted.count}\n\n"
+            f"Посты на одобрении: {pending_r.count}\n"
+            f"Одобрено вручную: {approved.count}\n"
+            f"Отклонено: {rejected.count}\n\n"
+            f"Анти-кейсов (выученных): {negatives.count}"
         )
         await update.message.reply_text(text)
     except Exception as e:
         await update.message.reply_text(f"Ошибка статистики: {str(e)}")
 
+# ────────────────────────────────────────────────
+# Plain text → add as anti-case manually
+# ────────────────────────────────────────────────
+async def add_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    feedback = update.message.text.strip()
+    if not feedback:
+        return
+
+    try:
+        res    = supabase.table("negative_constraints").insert({"feedback": feedback}).execute()
+        new_id = res.data[0]["id"]
+        await update.message.reply_text(
+            f"✅ Анти-кейс добавлен (ID: {str(new_id)[:8]}…):\n{feedback}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка добавления: {str(e)}")
+
+# ────────────────────────────────────────────────
+# MAIN
+# ────────────────────────────────────────────────
 def main():
     print("🚀 ЗАПУСК FEEDBACK BOT")
 
     app = ApplicationBuilder().token(TELEGRAM_FEEDBACK_BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("list", list_feedbacks))
-    app.add_handler(CommandHandler("delete", delete_feedback))
-    app.add_handler(CommandHandler("stats", stats))
-
-    # Any non-command text → add as new anti-case
+    app.add_handler(CommandHandler("start",   start))
+    app.add_handler(CommandHandler("approve", approve))
+    app.add_handler(CommandHandler("reject",  reject))
+    app.add_handler(CommandHandler("pending", pending))
+    app.add_handler(CommandHandler("list",    list_feedbacks))
+    app.add_handler(CommandHandler("delete",  delete_feedback))
+    app.add_handler(CommandHandler("stats",   stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_feedback))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
