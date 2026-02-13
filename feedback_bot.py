@@ -166,7 +166,7 @@ async def reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if reason:
             constraint_id = add_negative_constraint(reason)
             reply_lines.append(f"📚 Причина сохранена как анти-кейс: «{reason}»")
-            reply_lines.append(f"(ID анти-кейса: {str(constraint_id)[:8]}…)")
+            reply_lines.append(f"(ID анти-кейса: {constraint_id})")
         else:
             reply_lines.append("💡 Совет: укажи причину после ID, чтобы бот запомнил её.")
             reply_lines.append("Пример: /reject <id> новости о крипте не нужны")
@@ -194,10 +194,9 @@ async def pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = ["📋 Посты на одобрении:\n"]
         for row in res.data:
             dt     = row["created_at"].split("T")[0]
-            short_id = str(row["id"])[:8]
             lines.append(
                 f"• [{row['region']}] {row['title'][:60]}…\n"
-                f"  ID: {short_id}… | {dt}\n"
+                f"  {dt}\n"
                 f"  /approve {row['id']}\n"
                 f"  /reject {row['id']} <причина>\n"
             )
@@ -223,7 +222,7 @@ async def list_feedbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = ["📋 Анти-кейсы:\n"]
         for row in res.data:
             dt = row["created_at"].split("T")[0]
-            lines.append(f"• {dt} | {row['feedback'][:80]}\n  ID: {str(row['id'])[:8]}…")
+            lines.append(f"• {dt} | {row['feedback'][:80]}\n  ID: {row['id']}")
 
         await update.message.reply_text("\n".join(lines))
     except Exception as e:
@@ -294,7 +293,7 @@ async def add_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         res    = supabase.table("negative_constraints").insert({"feedback": feedback}).execute()
         new_id = res.data[0]["id"]
         await update.message.reply_text(
-            f"✅ Анти-кейс добавлен (ID: {str(new_id)[:8]}…):\n{feedback}"
+            f"✅ Анти-кейс добавлен (ID: {new_id}):\n{feedback}"
         )
     except Exception as e:
         await update.message.reply_text(f"Ошибка добавления: {str(e)}")
