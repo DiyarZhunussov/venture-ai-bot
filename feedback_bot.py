@@ -107,6 +107,10 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url_key   = post.get("url") or post_text[:100]
         region    = post.get("region", "Мир")
 
+        # Append the source link to the post
+        if post.get("url"):
+            post_text = f"{post_text}\n\n🔗 {post['url']}"
+
         # Publish to channel using the main bot
         if image_url:
             await main_bot.send_photo(
