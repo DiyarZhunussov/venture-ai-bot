@@ -1,9 +1,14 @@
 name: Main Bot (triggered)
 
 on:
-  workflow_dispatch: # manual trigger
+  workflow_dispatch:
+    inputs:
+      post_type:
+        description: 'Post type: news or education'
+        required: false
+        default: 'news'
   repository_dispatch:
-    types: [cron-trigger] # fired by cron-job.org
+    types: [news-trigger, education-trigger]
 
 jobs:
   run:
@@ -33,4 +38,6 @@ jobs:
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           GOOGLE_SEARCH_API_KEY: ${{ secrets.GOOGLE_SEARCH_API_KEY }}
           GOOGLE_SEARCH_ENGINE_ID: ${{ secrets.GOOGLE_SEARCH_ENGINE_ID }}
+          # Detect post type from either repository_dispatch event or manual input
+          POST_TYPE: ${{ github.event.action == 'education-trigger' && 'education' || github.event.inputs.post_type || 'news' }}
         run: python bridge.py
