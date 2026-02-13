@@ -278,10 +278,13 @@ async def main():
         await bot.send_message(TELEGRAM_ADMIN_ID, f"Gemini ошибка: {str(e)}")
         return
 
+    # Append source link to post text (for both approval and auto modes)
+    if best.get("url"):
+        post_text = f"{post_text}\n\n🔗 {best['url']}"
+
     # 4a. APPROVAL MODE — first 100 posts: ask admin before publishing
     if approval_mode:
-        pending_id = save_pending_post(best, post_text, image_url)
-        if not pending_id:
+        pending_id = save_pending_post(best, post_text, image_url)        if not pending_id:
             await bot.send_message(TELEGRAM_ADMIN_ID, "❌ Не удалось сохранить пост на одобрение.")
             return
 
