@@ -38,6 +38,7 @@ jobs:
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           GOOGLE_SEARCH_API_KEY: ${{ secrets.GOOGLE_SEARCH_API_KEY }}
           GOOGLE_SEARCH_ENGINE_ID: ${{ secrets.GOOGLE_SEARCH_ENGINE_ID }}
-          # Detect post type from either repository_dispatch event or manual input
+          TELEGRAM_NEWS_THREAD_ID: ${{ secrets.TELEGRAM_NEWS_THREAD_ID }}
+          TELEGRAM_EDUCATION_THREAD_ID: ${{ secrets.TELEGRAM_EDUCATION_THREAD_ID }}
           POST_TYPE: ${{ github.event.action == 'education-trigger' && 'education' || github.event.inputs.post_type || 'news' }}
         run: python bridge.py
