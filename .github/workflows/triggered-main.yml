@@ -28,8 +28,11 @@ jobs:
           pip install -r requirements.txt
 
       - name: Debug secrets
+        env:
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
         run: |
           echo "TAVILY set: ${{ secrets.TAVILY_API_KEY != '' }}"
+          python -c "import os; key = os.getenv('TAVILY_API_KEY', ''); print('Key length:', len(key)); print('Key starts with:', key[:8] if key else 'EMPTY')"
 
       - name: Run bot
         env:
