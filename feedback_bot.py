@@ -115,6 +115,8 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             thread_id = int(NEWS_THREAD_ID) if NEWS_THREAD_ID else None
 
+        print(f"DEBUG: region={region}, NEWS_THREAD_ID={NEWS_THREAD_ID}, EDUCATION_THREAD_ID={EDUCATION_THREAD_ID}, thread_id={thread_id}, chat_id={TELEGRAM_CHAT_ID}")
+
         # Build kwargs for send
         send_kwargs = {"chat_id": TELEGRAM_CHAT_ID}
         if thread_id:
