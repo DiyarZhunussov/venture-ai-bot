@@ -7,31 +7,31 @@ from supabase import create_client, Client
 import google.generativeai as genai
 from telegram import Bot
 from telegram.error import TelegramError
+from tavily import TavilyClient
 
 # ────────────────────────────────────────────────
 # ENVIRONMENT VARIABLES
 # ────────────────────────────────────────────────
-GEMINI_API_KEY          = os.getenv("GEMINI_API_KEY")
-TELEGRAM_BOT_TOKEN      = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID        = os.getenv("TELEGRAM_CHAT_ID")         # channel OR supergroup ID
-TELEGRAM_ADMIN_ID       = os.getenv("TELEGRAM_ADMIN_ID")
-SUPABASE_URL            = os.getenv("SUPABASE_URL")
-SUPABASE_KEY            = os.getenv("SUPABASE_KEY")
-UNSPLASH_ACCESS_KEY     = os.getenv("UNSPLASH_ACCESS_KEY")
-GOOGLE_SEARCH_API_KEY   = os.getenv("GOOGLE_SEARCH_API_KEY")
-GOOGLE_SEARCH_ENGINE_ID = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
-POST_TYPE               = os.getenv("POST_TYPE", "news")        # "news" or "education"
+GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY")
+TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_ADMIN_ID   = os.getenv("TELEGRAM_ADMIN_ID")
+SUPABASE_URL        = os.getenv("SUPABASE_URL")
+SUPABASE_KEY        = os.getenv("SUPABASE_KEY")
+UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
+TAVILY_API_KEY      = os.getenv("TAVILY_API_KEY")
+POST_TYPE           = os.getenv("POST_TYPE", "news")
 
-# Supergroup topic thread IDs (optional — leave empty to post to channel instead)
-NEWS_THREAD_ID          = os.getenv("TELEGRAM_NEWS_THREAD_ID")       # e.g. "12345"
-EDUCATION_THREAD_ID     = os.getenv("TELEGRAM_EDUCATION_THREAD_ID")  # e.g. "12346"
+# Supergroup topic thread IDs (optional)
+NEWS_THREAD_ID      = os.getenv("TELEGRAM_NEWS_THREAD_ID")
+EDUCATION_THREAD_ID = os.getenv("TELEGRAM_EDUCATION_THREAD_ID")
 
 if not all([GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SUPABASE_URL, SUPABASE_KEY]):
     print("Missing required environment variables.")
     sys.exit(1)
 
-if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_ENGINE_ID:
-    print("Warning: GOOGLE_SEARCH_API_KEY or GOOGLE_SEARCH_ENGINE_ID not set. Search will be skipped.")
+if not TAVILY_API_KEY:
+    print("Warning: TAVILY_API_KEY not set. News search will fail.")
 
 # ────────────────────────────────────────────────
 # INITIALIZATION
@@ -40,62 +40,60 @@ genai.configure(api_key=GEMINI_API_KEY)
 model    = genai.GenerativeModel('gemini-3-flash-preview')
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot      = Bot(token=TELEGRAM_BOT_TOKEN)
+tavily   = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
 # ────────────────────────────────────────────────
-# GOOGLE SEARCH QUERIES BY REGION
-# Results are filtered by Gemini for VC relevance
+# SEARCH QUERIES BY REGION
 # ────────────────────────────────────────────────
 SEARCH_QUERIES = [
-    # Kazakhstan — high priority
-    {"query": "стартапы венчурные инвестиции Казахстан 2026",         "region": "Kazakhstan",  "priority": 0},
-    {"query": "Kazakhstan startup venture capital funding 2026",       "region": "Kazakhstan",  "priority": 0},
-    {"query": "Казахстан венчурный фонд раунд инвестиции",            "region": "Kazakhstan",  "priority": 0},
+    # Kazakhstan (highest priority)
+    {"query": "стартапы венчурные инвестиции Казахстан 2026",        "region": "Kazakhstan",  "priority": 0},
+    {"query": "Kazakhstan startup venture capital funding 2026",      "region": "Kazakhstan",  "priority": 0},
+    {"query": "Казахстан венчурный фонд раунд стартап",              "region": "Kazakhstan",  "priority": 0},
 
     # Central Asia
-    {"query": "стартапы венчурные инвестиции Центральная Азия 2026",  "region": "CentralAsia", "priority": 1},
-    {"query": "Central Asia startup investment funding 2026",          "region": "CentralAsia", "priority": 1},
-    {"query": "Узбекистан Кыргызстан стартап инвестиции",             "region": "CentralAsia", "priority": 1},
+    {"query": "стартапы венчурные инвестиции Центральная Азия 2026", "region": "CentralAsia", "priority": 1},
+    {"query": "Central Asia startup investment funding 2026",         "region": "CentralAsia", "priority": 1},
+    {"query": "Узбекистан Кыргызстан стартап венчур инвестиции",     "region": "CentralAsia", "priority": 1},
 
-    # World — Tier-1 only
-    {"query": "OpenAI Anthropic NVIDIA Google funding news 2026",      "region": "World",       "priority": 2},
-    {"query": "top venture capital deal Series A B funding 2026",      "region": "World",       "priority": 2},
-    {"query": "startup unicorn IPO major investment news 2026",        "region": "World",       "priority": 2},
+    # World — Tier-1 VC/tech only
+    {"query": "OpenAI Anthropic NVIDIA Google major AI funding 2026", "region": "World",       "priority": 2},
+    {"query": "top venture capital deal Series A B C funding 2026",   "region": "World",       "priority": 2},
+    {"query": "startup unicorn IPO major investment news 2026",       "region": "World",       "priority": 2},
 ]
 
-REGION_EMOJI = {
+REGION_HEADER = {
     "Kazakhstan":  "Kazakhstan",
     "CentralAsia": "Central Asia",
     "World":       "World",
 }
 
 # ────────────────────────────────────────────────
-# ACTIVAT VC COURSE LESSONS
-# Sourced from activat.vc/startup-course/
+# ACTIVAT VC LESSONS
 # ────────────────────────────────────────────────
 ACTIVAT_LESSONS = [
-    {"title": "Какой путь проходят стартапы",          "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy"},
-    {"title": "Что такое MVP и зачем он нужен",        "url": "https://activat.vc/startup-course/lesson/chto-takoe-mvp-i-zachem-on-nuzhen"},
-    {"title": "Как найти product-market fit",          "url": "https://activat.vc/startup-course/lesson/kak-naiti-product-market-fit"},
-    {"title": "Как привлечь первых клиентов",          "url": "https://activat.vc/startup-course/lesson/kak-privlech-pervyh-klientov"},
-    {"title": "Юнит-экономика для стартапов",          "url": "https://activat.vc/startup-course/lesson/yunit-ekonomika-dlya-startapov"},
-    {"title": "Как сделать питч-дек",                  "url": "https://activat.vc/startup-course/lesson/kak-sdelat-pitch-deck"},
-    {"title": "Как работают венчурные инвестиции",     "url": "https://activat.vc/startup-course/lesson/kak-rabotayut-venchurnye-investicii"},
-    {"title": "Что такое cap table",                   "url": "https://activat.vc/startup-course/lesson/chto-takoe-cap-table"},
-    {"title": "Как проходит due diligence",            "url": "https://activat.vc/startup-course/lesson/kak-prohodit-due-diligence"},
-    {"title": "Что такое term sheet",                  "url": "https://activat.vc/startup-course/lesson/chto-takoe-term-sheet"},
+    {"title": "Какой путь проходят стартапы",      "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy"},
+    {"title": "Что такое MVP и зачем он нужен",    "url": "https://activat.vc/startup-course/lesson/chto-takoe-mvp-i-zachem-on-nuzhen"},
+    {"title": "Как найти product-market fit",      "url": "https://activat.vc/startup-course/lesson/kak-naiti-product-market-fit"},
+    {"title": "Как привлечь первых клиентов",      "url": "https://activat.vc/startup-course/lesson/kak-privlech-pervyh-klientov"},
+    {"title": "Юнит-экономика для стартапов",      "url": "https://activat.vc/startup-course/lesson/yunit-ekonomika-dlya-startapov"},
+    {"title": "Как сделать питч-дек",              "url": "https://activat.vc/startup-course/lesson/kak-sdelat-pitch-deck"},
+    {"title": "Как работают венчурные инвестиции", "url": "https://activat.vc/startup-course/lesson/kak-rabotayut-venchurnye-investicii"},
+    {"title": "Что такое cap table",               "url": "https://activat.vc/startup-course/lesson/chto-takoe-cap-table"},
+    {"title": "Как проходит due diligence",        "url": "https://activat.vc/startup-course/lesson/kak-prohodit-due-diligence"},
+    {"title": "Что такое term sheet",              "url": "https://activat.vc/startup-course/lesson/chto-takoe-term-sheet"},
 ]
 
-# Other education topics (internet/global VC knowledge)
 GLOBAL_EDUCATION_TOPICS = [
-    "Как работает венчурный капитал: полное объяснение для фаундеров",
+    "Как работает венчурный капитал: объяснение для фаундеров",
     "Разница между pre-seed, seed и Series A раундами",
     "Как считать runway и burn rate стартапа",
     "Vesting и cliff: опционная программа для команды",
-    "Bootstrapping vs венчурное финансирование: плюсы и минусы",
+    "Bootstrapping vs венчурное финансирование",
     "Как работают акселераторы и чем отличаются от инкубаторов",
     "Что такое convertible note и SAFE",
-    "Как венчурные фонды зарабатывают деньги (модель 2-20)",
-    "CAC и LTV: юнит-экономика которую хотят видеть инвесторы",
+    "Как венчурные фонды зарабатывают (модель 2-20)",
+    "CAC и LTV: юнит-экономика для инвесторов",
     "Как подготовиться к питчу перед венчурным инвестором",
 ]
 
@@ -125,9 +123,15 @@ def get_posted_count() -> int:
     try:
         res = supabase.table("posted_news").select("count", count="exact").execute()
         return res.count or 0
-    except Exception as e:
-        print(f"Failed to get post count: {e}")
+    except:
         return 999
+
+def get_education_count() -> int:
+    try:
+        res = supabase.table("posted_news").select("count", count="exact").eq("news_type", "EDUCATION").execute()
+        return res.count or 0
+    except:
+        return 0
 
 def save_pending_post(candidate: dict, post_text: str, image_url) -> str:
     try:
@@ -148,113 +152,110 @@ def fetch_negative_constraints() -> list:
     try:
         res = supabase.table("negative_constraints").select("feedback").execute()
         return [row["feedback"].lower() for row in res.data]
-    except Exception as e:
-        print(f"Failed to load negative constraints: {e}")
-        return []
-
-def get_education_day_counter() -> int:
-    """Returns how many education posts have been published, used to alternate Activat vs global."""
-    try:
-        res = supabase.table("posted_news").select("count", count="exact").eq("news_type", "EDUCATION").execute()
-        return res.count or 0
     except:
-        return 0
+        return []
 
 # ────────────────────────────────────────────────
-# GOOGLE SEARCH
+# TAVILY SEARCH
 # ────────────────────────────────────────────────
-def google_search(query: str, num: int = 5) -> list:
-    """Returns list of {title, url, snippet} from Google Custom Search API."""
-    if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_ENGINE_ID:
+def tavily_search(query: str, max_results: int = 5) -> list:
+    """Search the full web via Tavily. Returns list of {title, url, snippet}."""
+    if not tavily:
         return []
     try:
-        params = {
-            "key": GOOGLE_SEARCH_API_KEY,
-            "cx":  GOOGLE_SEARCH_ENGINE_ID,
-            "q":   query,
-            "num": num,
-            "dateRestrict": "d7",  # last 7 days only
-            "lr": "lang_ru|lang_en",
-        }
-        resp = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=10)
-        if resp.status_code != 200:
-            print(f"Google Search error {resp.status_code}: {resp.text[:200]}")
-            return []
-        items = resp.json().get("items", [])
-        return [{"title": i.get("title",""), "url": i.get("link",""), "snippet": i.get("snippet","")} for i in items]
+        response = tavily.search(
+            query=query,
+            search_depth="basic",
+            max_results=max_results,
+            days=7,             # last 7 days only
+        )
+        results = []
+        for r in response.get("results", []):
+            results.append({
+                "title":   r.get("title", ""),
+                "url":     r.get("url", ""),
+                "snippet": r.get("content", "")[:300],
+            })
+        return results
     except Exception as e:
-        print(f"Google Search exception: {e}")
+        print(f"Tavily search error: {e}")
         return []
+
+# ────────────────────────────────────────────────
+# VC RELEVANCE KEYWORD FILTER
+# ────────────────────────────────────────────────
+VC_KEYWORDS = [
+    "стартап", "венчур", "инвестиц", "раунд", "фонд",
+    "startup", "venture", "funding", "investment", "investor",
+    "series a", "series b", "series c", "seed", "pre-seed",
+    "ipo", "unicorn", "единорог", "акселератор", "accelerator",
+    "openai", "anthropic", "nvidia", "sequoia", "a16z", "y combinator",
+    "techcrunch", "fintech", "edtech", "healthtech", "saas", "pitch",
+]
 
 def is_vc_relevant(title: str, snippet: str, negative_rules: list) -> bool:
-    """Quick keyword pre-filter before sending to Gemini."""
-    vc_keywords = [
-        "стартап", "венчур", "инвестиц", "раунд", "фонд", "startup", "venture",
-        "funding", "investment", "series a", "series b", "seed", "pre-seed",
-        "ipo", "unicorn", "единорог", "акселератор", "accelerator", "pitch",
-        "openai", "anthropic", "nvidia", "google deepmind", "a16z", "sequoia",
-        "y combinator", "techcrunch", "fintech", "edtech", "healthtech", "saas",
-    ]
     content = (title + " " + snippet).lower()
     if any(rule in content for rule in negative_rules):
         return False
-    return any(kw in content for kw in vc_keywords)
+    return any(kw in content for kw in VC_KEYWORDS)
 
-async def score_and_filter_with_gemini(candidates: list) -> dict:
-    """
-    Send top candidates to Gemini and ask it to pick the best one
-    that is genuinely about startups/VC, not just tangentially related.
-    Returns the best candidate dict or None.
-    """
+# ────────────────────────────────────────────────
+# GEMINI PICKS BEST ARTICLE
+# ────────────────────────────────────────────────
+async def pick_best_with_gemini(candidates: list) -> dict:
     if not candidates:
         return None
+    if len(candidates) == 1:
+        return candidates[0]
 
     articles_text = ""
     for i, c in enumerate(candidates[:10]):
-        articles_text += f"{i+1}. [{c['region']}] {c['title']}\n   {c['snippet']}\n   URL: {c['url']}\n\n"
+        articles_text += f"{i+1}. [{c['region']}] {c['title']}\n   {c['snippet']}\n\n"
 
     try:
         prompt = (
             "You are a venture capital news editor for a Central Asian VC Telegram channel.\n"
-            "From this list of articles, pick ONLY ONE that is the most relevant to startups and venture capital.\n"
-            "It must be about: startup funding rounds, VC fund news, major tech company strategy (OpenAI, Anthropic, NVIDIA, Google), "
+            "From this list, pick ONE article that is MOST relevant to startups and venture capital.\n"
+            "Must be about: startup funding, VC fund news, major tech company AI strategy (OpenAI/Anthropic/NVIDIA/Google), "
             "startup ecosystem, or venture market trends.\n"
-            "Do NOT pick: consumer finance, taxes for individuals, sports, politics, general business news.\n\n"
-            f"{articles_text}\n"
-            "Respond with ONLY the number of the best article (e.g.: 3). Nothing else."
+            "Do NOT pick: consumer finance, personal taxes, sports, politics, general business.\n\n"
+            f"{articles_text}"
+            "Respond with ONLY the number (e.g.: 3). Nothing else."
         )
         response = model.generate_content(prompt)
-        choice   = response.text.strip().strip(".")
-        idx      = int(choice) - 1
+        idx = int(response.text.strip().strip(".")) - 1
         if 0 <= idx < len(candidates[:10]):
             return candidates[idx]
     except Exception as e:
-        print(f"Gemini scoring error: {e}")
+        print(f"Gemini pick error: {e}")
 
-    return candidates[0]  # fallback to first
+    return candidates[0]
 
 # ────────────────────────────────────────────────
-# TELEGRAM SEND HELPER (supports supergroup topics)
+# TELEGRAM SEND (supports supergroup topics)
 # ────────────────────────────────────────────────
 async def send_to_channel(text: str, image_url: str, thread_id: str = None):
-    """Send message to channel or supergroup topic."""
     kwargs = {"chat_id": TELEGRAM_CHAT_ID}
     if thread_id:
         kwargs["message_thread_id"] = int(thread_id)
 
-    if image_url:
-        await bot.send_photo(
-            photo=image_url,
-            caption=text,
-            parse_mode="HTML" if "<" in text else None,
-            **kwargs
-        )
-    else:
-        await bot.send_message(
-            text=text,
-            disable_web_page_preview=False,
-            **kwargs
-        )
+    try:
+        if image_url:
+            await bot.send_photo(
+                photo=image_url,
+                caption=text,
+                parse_mode="HTML" if "<" in text else None,
+                **kwargs
+            )
+        else:
+            await bot.send_message(
+                text=text,
+                disable_web_page_preview=False,
+                **kwargs
+            )
+    except TelegramError as te:
+        print(f"Telegram error: {te}")
+        await bot.send_message(TELEGRAM_ADMIN_ID, f"Send error: {str(te)}")
 
 # ────────────────────────────────────────────────
 # NEWS POST LOGIC (08:00)
@@ -264,9 +265,9 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
 
     all_candidates = []
 
-    print("Searching via Google...")
+    print("Searching via Tavily...")
     for search in SEARCH_QUERIES:
-        results = google_search(search["query"], num=5)
+        results = tavily_search(search["query"], max_results=5)
         for r in results:
             if is_already_posted(r["url"]):
                 continue
@@ -281,35 +282,42 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
                 "key":      r["url"],
             })
 
-    print(f"Candidates after keyword filter: {len(all_candidates)}")
+    # Deduplicate by URL
+    seen = set()
+    unique = []
+    for c in all_candidates:
+        if c["url"] not in seen:
+            seen.add(c["url"])
+            unique.append(c)
+    all_candidates = unique
+
+    print(f"Candidates after filter: {len(all_candidates)}")
 
     if not all_candidates:
-        print("No candidates found.")
+        print("No suitable news found.")
         await bot.send_message(TELEGRAM_ADMIN_ID, "Main Bot: No suitable news found today.")
         return
 
-    # Sort by region priority first
+    # Sort by region priority then let Gemini pick best
     all_candidates.sort(key=lambda c: c["priority"])
+    best = await pick_best_with_gemini(all_candidates)
 
-    # Let Gemini pick the best one
-    best = await score_and_filter_with_gemini(all_candidates)
     if not best:
-        print("Gemini could not select a candidate.")
+        print("Could not select a candidate.")
         return
 
     print(f"Selected [{best['region']}]: {best['title']}")
-
-    region_header = REGION_EMOJI.get(best["region"], best["region"])
+    region_header = REGION_HEADER.get(best["region"], best["region"])
 
     try:
         prompt = (
             "You are the editor of a Telegram channel about venture capital in Central Asia.\n"
             "Write a short engaging post in RUSSIAN (300-600 characters) based on this news:\n\n"
             f"Title: {best['title']}\n"
-            f"Snippet: {best['snippet']}\n"
+            f"Summary: {best['snippet']}\n"
             f"URL: {best['url']}\n\n"
-            f"IMPORTANT: Start the post EXACTLY with: {region_header}\n"
-            "Then a new line, then the post text.\n"
+            f"IMPORTANT: Start the post EXACTLY with this line: {region_header}\n"
+            "Then a blank line, then the post text.\n"
             "Style: informative, light analysis, emojis, end with a question for discussion.\n"
             "No hashtags. Concise.\n"
         )
@@ -319,10 +327,10 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
         if not post_text.startswith(region_header):
             post_text = f"{region_header}\n\n{post_text}"
 
-        # Append source link
+        # Always append source link
         post_text = f"{post_text}\n\n{best['url']}"
 
-        # Try to get og:image
+        # Try og:image
         image_url = None
         try:
             from bs4 import BeautifulSoup
@@ -341,10 +349,8 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
         await bot.send_message(TELEGRAM_ADMIN_ID, f"Gemini error: {str(e)}")
         return
 
-    candidate = {**best}
-
     if approval_mode:
-        pending_id = save_pending_post(candidate, post_text, image_url)
+        pending_id = save_pending_post(best, post_text, image_url)
         if not pending_id:
             await bot.send_message(TELEGRAM_ADMIN_ID, "Failed to save post for approval.")
             return
@@ -366,33 +372,31 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
 
 # ────────────────────────────────────────────────
 # EDUCATION POST LOGIC (17:00)
-# Alternates: even day = Activat VC lesson, odd day = global topic
+# Even days = Activat VC lesson, Odd days = global topic
 # ────────────────────────────────────────────────
 async def run_education(posted_count: int, approval_mode: bool):
     print("MODE: EDUCATION (17:00)")
 
-    edu_count = get_education_day_counter()
-    use_activat = (edu_count % 2 == 0)  # even = Activat, odd = global
+    edu_count   = get_education_count()
+    use_activat = (edu_count % 2 == 0)
 
     if use_activat:
-        lesson_idx = (edu_count // 2) % len(ACTIVAT_LESSONS)
-        lesson     = ACTIVAT_LESSONS[lesson_idx]
+        idx        = (edu_count // 2) % len(ACTIVAT_LESSONS)
+        lesson     = ACTIVAT_LESSONS[idx]
         topic      = lesson["title"]
         source_url = lesson["url"]
         dedup_key  = f"activat_{topic[:60]}"
-        source_tag = f"Activat VC | {source_url}"
-        print(f"Activat VC lesson: {topic}")
+        print(f"Activat VC lesson #{idx}: {topic}")
     else:
-        topic_idx  = (edu_count // 2) % len(GLOBAL_EDUCATION_TOPICS)
-        topic      = GLOBAL_EDUCATION_TOPICS[topic_idx]
+        idx        = (edu_count // 2) % len(GLOBAL_EDUCATION_TOPICS)
+        topic      = GLOBAL_EDUCATION_TOPICS[idx]
         source_url = ""
-        dedup_key  = f"education_{topic[:60]}"
-        source_tag = "Global VC knowledge"
-        print(f"Global topic: {topic}")
+        dedup_key  = f"edu_global_{topic[:60]}"
+        print(f"Global topic #{idx}: {topic}")
 
     if is_already_posted(dedup_key):
         print(f"Topic already used: {topic}")
-        await bot.send_message(TELEGRAM_ADMIN_ID, f"Education: topic already used, skipping.")
+        await bot.send_message(TELEGRAM_ADMIN_ID, "Education: topic already used, skipping.")
         return
 
     try:
@@ -400,16 +404,16 @@ async def run_education(posted_count: int, approval_mode: bool):
             prompt = (
                 "You are the editor of a Telegram channel about venture capital in Central Asia.\n"
                 "Write a short educational post in RUSSIAN about this Activat VC course topic:\n\n"
-                f"Topic: \"{topic}\"\n"
-                f"Course URL: {source_url}\n\n"
+                f"Topic: \"{topic}\"\n\n"
                 "Requirements:\n"
                 "- Length: 400-700 characters\n"
                 "- Start EXACTLY with: Обучение | Activat VC\n"
-                "- Explain the topic simply for early-stage founders\n"
+                "- Explain simply for early-stage founders with examples\n"
                 "- Add emojis for readability\n"
-                "- End with: Подробнее в курсе Activat VC: {source_url}\n"
+                f"- End with: Подробнее в курсе Activat VC: {source_url}\n"
                 "- No hashtags\n"
             )
+            expected = "Обучение | Activat VC"
         else:
             prompt = (
                 "You are the editor of a Telegram channel about venture capital in Central Asia.\n"
@@ -418,19 +422,18 @@ async def run_education(posted_count: int, approval_mode: bool):
                 "Requirements:\n"
                 "- Length: 400-700 characters\n"
                 "- Start EXACTLY with: Обучение\n"
-                "- Explain the topic simply for early-stage founders\n"
-                "- Use concrete examples, numbers or analogies\n"
+                "- Explain simply for early-stage founders with concrete examples and numbers\n"
                 "- Add emojis for readability\n"
-                "- End with a question or call to discussion\n"
+                "- End with a discussion question\n"
                 "- No hashtags\n"
             )
+            expected = "Обучение"
 
         response  = model.generate_content(prompt)
         post_text = response.text.strip()
 
-        expected_start = "Обучение | Activat VC" if use_activat else "Обучение"
-        if not post_text.startswith(expected_start):
-            post_text = f"{expected_start}\n\n{post_text}"
+        if not post_text.startswith(expected):
+            post_text = f"{expected}\n\n{post_text}"
 
         print(f"Education post ready ({len(post_text)} chars)")
 
@@ -446,10 +449,12 @@ async def run_education(posted_count: int, approval_mode: bool):
         "key":    dedup_key,
     }
 
+    source_tag = f"Activat VC: {source_url}" if use_activat else "Global VC topic"
+
     if approval_mode:
         pending_id = save_pending_post(candidate, post_text, None)
         if not pending_id:
-            await bot.send_message(TELEGRAM_ADMIN_ID, "Failed to save education post for approval.")
+            await bot.send_message(TELEGRAM_ADMIN_ID, "Failed to save education post.")
             return
         preview = (
             f"EDUCATION POST FOR APPROVAL (#{posted_count + 1}/100)\n"
@@ -461,11 +466,11 @@ async def run_education(posted_count: int, approval_mode: bool):
             f"Reject:  /reject {pending_id} reason here"
         )
         await bot.send_message(TELEGRAM_ADMIN_ID, preview)
-        print(f"Education post sent for approval. ID: {pending_id}")
+        print(f"Education sent for approval. ID: {pending_id}")
     else:
         await send_to_channel(post_text, None, EDUCATION_THREAD_ID)
         add_to_posted(dedup_key, "EDUCATION", 8, "Education")
-        print("EDUCATION POST PUBLISHED!")
+        print("EDUCATION PUBLISHED!")
         await bot.send_message(TELEGRAM_ADMIN_ID, f"Published education:\n{post_text[:200]}...")
 
 # ────────────────────────────────────────────────
