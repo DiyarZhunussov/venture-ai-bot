@@ -155,11 +155,41 @@ def fetch_negative_constraints() -> list:
     except:
         return []
 
+def get_recent_post_titles(limit: int = 30) -> list:
+    """Get titles of recently posted/pending news for semantic duplicate detection."""
+    titles = []
+    try:
+        # From posted_news — get recent url_text entries (titles stored as keys)
+        res = supabase.table("posted_news") \
+            .select("url_text, news_type") \
+            .eq("news_type", "NEWS") \
+            .order("created_at", desc=True) \
+            .limit(limit) \
+            .execute()
+        titles += [row["url_text"] for row in res.data if row.get("url_text")]
+    except:
+        pass
+    try:
+        # Also check pending posts that haven't been approved yet
+        res2 = supabase.table("pending_posts") \
+            .select("title, url") \
+            .eq("status", "pending") \
+            .order("created_at", desc=True) \
+            .limit(10) \
+            .execute()
+        for row in res2.data:
+            if row.get("title"):
+                titles.append(row["title"])
+            if row.get("url"):
+                titles.append(row["url"])
+    except:
+        pass
+    return titles
+
 # ────────────────────────────────────────────────
 # TAVILY SEARCH
 # ────────────────────────────────────────────────
 def tavily_search(query: str, max_results: int = 5) -> list:
-    """Search the full web via Tavily. Returns list of {title, url, snippet}."""
     if not tavily:
         return []
     try:
@@ -167,7 +197,7 @@ def tavily_search(query: str, max_results: int = 5) -> list:
             query=query,
             search_depth="basic",
             max_results=max_results,
-            days=7,             # last 7 days only
+            days=7,
         )
         results = []
         for r in response.get("results", []):
@@ -200,7 +230,7 @@ def is_vc_relevant(title: str, snippet: str, negative_rules: list) -> bool:
     return any(kw in content for kw in VC_KEYWORDS)
 
 # ────────────────────────────────────────────────
-# GEMINI PICKS BEST ARTICLE
+# GEMINI: PICK BEST ARTICLE
 # ────────────────────────────────────────────────
 async def pick_best_with_gemini(candidates: list) -> dict:
     if not candidates:
@@ -215,9 +245,9 @@ async def pick_best_with_gemini(candidates: list) -> dict:
     try:
         prompt = (
             "You are a venture capital news editor for a Central Asian VC Telegram channel.\n"
-            "From this list, pick ONE article that is MOST relevant to startups and venture capital.\n"
-            "Must be about: startup funding, VC fund news, major tech company AI strategy (OpenAI/Anthropic/NVIDIA/Google), "
-            "startup ecosystem, or venture market trends.\n"
+            "From this list, pick ONE article MOST relevant to startups and venture capital.\n"
+            "Must be about: startup funding, VC fund news, major tech AI strategy "
+            "(OpenAI/Anthropic/NVIDIA/Google), startup ecosystem, or venture market trends.\n"
             "Do NOT pick: consumer finance, personal taxes, sports, politics, general business.\n\n"
             f"{articles_text}"
             "Respond with ONLY the number (e.g.: 3). Nothing else."
@@ -230,6 +260,33 @@ async def pick_best_with_gemini(candidates: list) -> dict:
         print(f"Gemini pick error: {e}")
 
     return candidates[0]
+
+# ────────────────────────────────────────────────
+# GEMINI: SEMANTIC DUPLICATE CHECK
+# ────────────────────────────────────────────────
+async def is_semantic_duplicate(candidate: dict, recent_titles: list) -> bool:
+    """Check if this story was already covered recently (same story, different source)."""
+    if not recent_titles:
+        return False
+    try:
+        recent_text = "\n".join(str(t) for t in recent_titles[:20])
+        prompt = (
+            f"New article title: {candidate['title']}\n"
+            f"New article snippet: {candidate['snippet'][:200]}\n\n"
+            f"Recently published articles/URLs:\n{recent_text}\n\n"
+            "Is the new article covering the SAME news story as any of the recent ones? "
+            "Same story means same event, same data, same announcement — just from a different source.\n"
+            "Answer only YES or NO."
+        )
+        response = model.generate_content(prompt)
+        answer = response.text.strip().upper()
+        is_dup = answer.startswith("YES")
+        if is_dup:
+            print(f"Semantic duplicate detected: {candidate['title']}")
+        return is_dup
+    except Exception as e:
+        print(f"Duplicate check error: {e}")
+        return False
 
 # ────────────────────────────────────────────────
 # TELEGRAM SEND (supports supergroup topics)
@@ -255,7 +312,17 @@ async def send_to_channel(text: str, image_url: str, thread_id: str = None):
             )
     except TelegramError as te:
         print(f"Telegram error: {te}")
-        await bot.send_message(TELEGRAM_ADMIN_ID, f"Send error: {str(te)}")
+        # Retry without image if image failed
+        if image_url:
+            try:
+                await bot.send_message(
+                    text=text,
+                    disable_web_page_preview=False,
+                    **kwargs
+                )
+            except TelegramError as te2:
+                print(f"Retry also failed: {te2}")
+                await bot.send_message(TELEGRAM_ADMIN_ID, f"Send error: {str(te2)}")
 
 # ────────────────────────────────────────────────
 # NEWS POST LOGIC (08:00)
@@ -298,12 +365,36 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
         await bot.send_message(TELEGRAM_ADMIN_ID, "Main Bot: No suitable news found today.")
         return
 
-    # Sort by region priority then let Gemini pick best
+    # Sort by region priority
     all_candidates.sort(key=lambda c: c["priority"])
-    best = await pick_best_with_gemini(all_candidates)
+
+    # Load recent posts for semantic duplicate check
+    recent_titles = get_recent_post_titles()
+    print(f"Loaded {len(recent_titles)} recent post titles for duplicate check.")
+
+    # Try candidates until we find one that isn't a semantic duplicate
+    best = None
+    remaining = list(all_candidates)
+
+    while remaining:
+        candidate = await pick_best_with_gemini(remaining)
+        if not candidate:
+            break
+
+        if not await is_semantic_duplicate(candidate, recent_titles):
+            best = candidate
+            break
+        else:
+            # Remove this duplicate and try next best
+            remaining = [c for c in remaining if c["url"] != candidate["url"]]
+            print(f"Skipping duplicate, {len(remaining)} candidates left.")
 
     if not best:
-        print("Could not select a candidate.")
+        print("All candidates are semantic duplicates of recent posts.")
+        await bot.send_message(
+            TELEGRAM_ADMIN_ID,
+            "Main Bot: All top candidates are duplicates of recent stories. No post today."
+        )
         return
 
     print(f"Selected [{best['region']}]: {best['title']}")
@@ -372,7 +463,7 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
 
 # ────────────────────────────────────────────────
 # EDUCATION POST LOGIC (17:00)
-# Even days = Activat VC lesson, Odd days = global topic
+# Even count = Activat VC lesson, Odd count = global topic
 # ────────────────────────────────────────────────
 async def run_education(posted_count: int, approval_mode: bool):
     print("MODE: EDUCATION (17:00)")
