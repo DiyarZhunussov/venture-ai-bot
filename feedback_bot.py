@@ -21,6 +21,8 @@ TELEGRAM_ADMIN_ID           = os.getenv("TELEGRAM_ADMIN_ID")
 TELEGRAM_CHAT_ID            = os.getenv("TELEGRAM_CHAT_ID")         # the channel
 SUPABASE_URL                = os.getenv("SUPABASE_URL")
 SUPABASE_KEY                = os.getenv("SUPABASE_KEY")
+NEWS_THREAD_ID              = os.getenv("TELEGRAM_NEWS_THREAD_ID")
+EDUCATION_THREAD_ID         = os.getenv("TELEGRAM_EDUCATION_THREAD_ID")
 
 if not all([TELEGRAM_FEEDBACK_BOT_TOKEN, TELEGRAM_ADMIN_ID, SUPABASE_URL, SUPABASE_KEY,
             TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
@@ -107,23 +109,30 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url_key   = post.get("url") or post_text[:100]
         region    = post.get("region", "Мир")
 
-        # Append the source link to the post
-        if post.get("url"):
-            post_text = f"{post_text}\n\n🔗 {post['url']}"
+        # Determine thread ID based on region
+        if region == "Education":
+            thread_id = int(EDUCATION_THREAD_ID) if EDUCATION_THREAD_ID else None
+        else:
+            thread_id = int(NEWS_THREAD_ID) if NEWS_THREAD_ID else None
+
+        # Build kwargs for send
+        send_kwargs = {"chat_id": TELEGRAM_CHAT_ID}
+        if thread_id:
+            send_kwargs["message_thread_id"] = thread_id
 
         # Publish to channel using the main bot
         if image_url:
             await main_bot.send_photo(
-                chat_id=TELEGRAM_CHAT_ID,
                 photo=image_url,
                 caption=post_text,
-                parse_mode="HTML" if "<" in post_text else None
+                parse_mode="HTML" if "<" in post_text else None,
+                **send_kwargs
             )
         else:
             await main_bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
                 text=post_text,
-                disable_web_page_preview=False
+                disable_web_page_preview=False,
+                **send_kwargs
             )
 
         # Mark as approved in pending_posts
