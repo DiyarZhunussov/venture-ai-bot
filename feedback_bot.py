@@ -323,7 +323,7 @@ async def add_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ────────────────────────────────────────────────
 # MAIN — webhook mode for Render
 # ────────────────────────────────────────────────
-async def main():
+def main():
     print("🚀 ЗАПУСК FEEDBACK BOT (webhook mode)")
 
     port        = int(os.getenv("PORT", 10000))
@@ -344,23 +344,18 @@ async def main():
     app.add_handler(CommandHandler("stats",   stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_feedback))
 
-    async with app:
-        await app.bot.set_webhook(url=webhook_url)
-        await app.initialize()
-        await app.start()
-        print("Bot is running in webhook mode.")
-        # Start the webhook server
-        await app.updater.start_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=TELEGRAM_FEEDBACK_BOT_TOKEN,
-        )
-        # Keep running forever
-        await asyncio.Event().wait()
+    print("Bot is running in webhook mode.")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=TELEGRAM_FEEDBACK_BOT_TOKEN,
+        webhook_url=webhook_url,
+        drop_pending_updates=True,
+    )
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        main()
     except (KeyboardInterrupt, SystemExit):
         print("Bot stopped.")
     except Exception as e:
