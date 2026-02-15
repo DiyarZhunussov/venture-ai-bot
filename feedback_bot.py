@@ -325,7 +325,13 @@ async def add_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ────────────────────────────────────────────────
 if __name__ == "__main__":
     import logging
+    import asyncio
+
     logging.basicConfig(level=logging.INFO)
+
+    # Python 3.14 requires explicit event loop creation
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     port        = int(os.getenv("PORT", 10000))
     base_url    = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
