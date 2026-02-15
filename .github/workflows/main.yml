@@ -1,12 +1,9 @@
 name: Main Bot
 
 on:
-  workflow_dispatch: # manual trigger only
-  # FIX: Removed the cron schedules from here.
-  # Scheduling is now handled EITHER by cron-job.org → triggered-main.yml (recommended)
-  # OR you can re-add the crons below — but NOT both at the same time, or posts will duplicate.
-  #
-  # If you want GitHub-native cron as a fallback (no cron-job.org), uncomment these:
+  workflow_dispatch:
+  # Scheduling handled by cron-job.org → triggered-main.yml
+  # Uncomment below if you want GitHub-native cron instead:
   # schedule:
   #   - cron: '0 3 * * *'   # 08:00 Astana (UTC+5)
   #   - cron: '0 12 * * *'  # 17:00 Astana (UTC+5)
@@ -30,13 +27,13 @@ jobs:
 
       - name: Run bot
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_ADMIN_ID: ${{ secrets.TELEGRAM_ADMIN_ID }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-          GOOGLE_SEARCH_API_KEY: ${{ secrets.GOOGLE_SEARCH_API_KEY }}
-          GOOGLE_SEARCH_ENGINE_ID: ${{ secrets.GOOGLE_SEARCH_ENGINE_ID }}
+          GROQ_API_KEY:           ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_BOT_TOKEN:     ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:       ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_ADMIN_ID:      ${{ secrets.TELEGRAM_ADMIN_ID }}
+          SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:           ${{ secrets.SUPABASE_KEY }}
+          TAVILY_API_KEY:         ${{ secrets.TAVILY_API_KEY }}
+          UNSPLASH_ACCESS_KEY:    ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          POST_TYPE:              ${{ github.event.inputs.post_type || 'news' }}
         run: python bridge.py
