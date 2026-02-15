@@ -370,10 +370,14 @@ async def main():
         await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        print("Bot stopped.")
-    except Exception as e:
-        print(f"Feedback bot краш: {e}")
-        sys.exit(1)
+    import time
+    while True:
+        try:
+            asyncio.run(main())
+        except (KeyboardInterrupt, SystemExit):
+            print("Bot stopped.")
+            break
+        except Exception as e:
+            print(f"Feedback bot error: {e}")
+            print("Restarting in 10 seconds...")
+            time.sleep(10)
