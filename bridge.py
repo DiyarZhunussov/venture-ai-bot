@@ -4,7 +4,7 @@ import asyncio
 import requests
 from datetime import datetime
 from supabase import create_client, Client
-import google.generativeai as genai
+from groq import Groq
 from telegram import Bot
 from telegram.error import TelegramError
 from tavily import TavilyClient
@@ -12,7 +12,7 @@ from tavily import TavilyClient
 # ────────────────────────────────────────────────
 # ENVIRONMENT VARIABLES
 # ────────────────────────────────────────────────
-GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY        = os.getenv("GROQ_API_KEY")
 TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_ADMIN_ID   = os.getenv("TELEGRAM_ADMIN_ID")
@@ -26,7 +26,7 @@ POST_TYPE           = os.getenv("POST_TYPE", "news")
 NEWS_THREAD_ID      = os.getenv("TELEGRAM_NEWS_THREAD_ID")
 EDUCATION_THREAD_ID = os.getenv("TELEGRAM_EDUCATION_THREAD_ID")
 
-if not all([GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SUPABASE_URL, SUPABASE_KEY]):
+if not all([GROQ_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SUPABASE_URL, SUPABASE_KEY]):
     print("Missing required environment variables.")
     sys.exit(1)
 
@@ -36,54 +36,24 @@ if not TAVILY_API_KEY:
 # ────────────────────────────────────────────────
 # INITIALIZATION
 # ────────────────────────────────────────────────
-genai.configure(api_key=GEMINI_API_KEY)
-model    = genai.GenerativeModel('gemini-3-flash-preview')
+groq_client = Groq(api_key=GROQ_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot      = Bot(token=TELEGRAM_BOT_TOKEN)
 tavily   = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
 # ────────────────────────────────────────────────
-# GEMINI RATE LIMITER (free tier: 5 RPM, 20 RPD)
+# GROQ LLM WRAPPER
 # ────────────────────────────────────────────────
-import time
-import threading
-
-_gemini_lock      = threading.Lock()
-_rpm_timestamps   = []   # timestamps of calls in last 60s
-_rpd_count        = 0    # total calls today
-RPM_LIMIT         = 5
-RPD_LIMIT         = 20
 
 def gemini_generate(prompt: str) -> str:
-    """Wrapper around model.generate_content with RPM + RPD rate limiting."""
-    global _rpd_count
-    with _gemini_lock:
-        now = time.time()
-
-        # RPD check
-        if _rpd_count >= RPD_LIMIT:
-            raise Exception(f"Gemini daily limit reached ({RPD_LIMIT} requests). Try again tomorrow.")
-
-        # RPM check — remove timestamps older than 60s
-        cutoff_min = now - 60
-        while _rpm_timestamps and _rpm_timestamps[0] < cutoff_min:
-            _rpm_timestamps.pop(0)
-
-        if len(_rpm_timestamps) >= RPM_LIMIT:
-            wait = 61 - (now - _rpm_timestamps[0])
-            print(f"Gemini RPM limit hit, waiting {wait:.1f}s...")
-            time.sleep(wait)
-            # Re-clean after sleep
-            now = time.time()
-            cutoff_min = now - 60
-            while _rpm_timestamps and _rpm_timestamps[0] < cutoff_min:
-                _rpm_timestamps.pop(0)
-
-        _rpm_timestamps.append(time.time())
-        _rpd_count += 1
-        print(f"Gemini call #{_rpd_count}/{RPD_LIMIT} today")
-
-    return model.generate_content(prompt).text.strip()
+    """Call Groq API with llama-3.3-70b. Drop-in replacement for Gemini."""
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1024,
+        temperature=0.7,
+    )
+    return response.choices[0].message.content.strip()
 
 # ────────────────────────────────────────────────
 # SEARCH QUERIES BY REGION
