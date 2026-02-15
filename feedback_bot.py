@@ -314,10 +314,34 @@ async def add_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ошибка добавления: {str(e)}")
 
 # ────────────────────────────────────────────────
+# HEALTH CHECK SERVER (required for Render Web Service)
+# ────────────────────────────────────────────────
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass  # Silence request logs
+
+def run_health_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    print(f"Health check server running on port {port}")
+    server.serve_forever()
+
+# ────────────────────────────────────────────────
 # MAIN
 # ────────────────────────────────────────────────
 def main():
     print("🚀 ЗАПУСК FEEDBACK BOT")
+
+    # Start health check server in background thread (for Render)
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
 
     app = ApplicationBuilder().token(TELEGRAM_FEEDBACK_BOT_TOKEN).build()
 
