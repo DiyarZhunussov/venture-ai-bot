@@ -323,12 +323,11 @@ async def add_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ────────────────────────────────────────────────
 # MAIN — webhook mode for Render
 # ────────────────────────────────────────────────
-def main():
+async def main():
     print("🚀 ЗАПУСК FEEDBACK BOT (webhook mode)")
 
-    port      = int(os.getenv("PORT", 10000))
-    # Render provides the public URL as RENDER_EXTERNAL_URL
-    base_url  = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    port        = int(os.getenv("PORT", 10000))
+    base_url    = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
     webhook_url = f"{base_url}/{TELEGRAM_FEEDBACK_BOT_TOKEN}"
 
     print(f"Webhook URL: {webhook_url}")
@@ -345,16 +344,23 @@ def main():
     app.add_handler(CommandHandler("stats",   stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_feedback))
 
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=TELEGRAM_FEEDBACK_BOT_TOKEN,
-        webhook_url=webhook_url,
-    )
+    async with app:
+        await app.bot.set_webhook(url=webhook_url)
+        await app.initialize()
+        await app.start()
+        print("Bot is running in webhook mode.")
+        # Start the webhook server
+        await app.updater.start_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=TELEGRAM_FEEDBACK_BOT_TOKEN,
+        )
+        # Keep running forever
+        await asyncio.Event().wait()
 
 if __name__ == "__main__":
     try:
-        main()
+        asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("Bot stopped.")
     except Exception as e:
