@@ -352,10 +352,13 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("stats",   stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_feedback))
 
+    url_path = TELEGRAM_FEEDBACK_BOT_TOKEN  # must match the path in webhook_url
+
     print("Bot is running in webhook mode.")
     app.run_webhook(
         listen="0.0.0.0",
         port=port,
+        url_path=url_path,
         key=None,
         cert=None,
         webhook_url=webhook_url,
