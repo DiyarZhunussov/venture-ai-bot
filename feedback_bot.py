@@ -123,14 +123,21 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_kwargs["message_thread_id"] = thread_id
 
         # Publish to channel using the main bot
+        # Try with image first, fall back to text-only if image fails
+        published = False
         if image_url:
-            await main_bot.send_photo(
-                photo=image_url,
-                caption=post_text,
-                parse_mode="HTML" if "<" in post_text else None,
-                **send_kwargs
-            )
-        else:
+            try:
+                await main_bot.send_photo(
+                    photo=image_url,
+                    caption=post_text,
+                    parse_mode="HTML" if "<" in post_text else None,
+                    **send_kwargs
+                )
+                published = True
+            except Exception as img_err:
+                print(f"Image send failed ({img_err}), falling back to text-only.")
+
+        if not published:
             await main_bot.send_message(
                 text=post_text,
                 disable_web_page_preview=False,
