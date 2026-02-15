@@ -43,6 +43,49 @@ bot      = Bot(token=TELEGRAM_BOT_TOKEN)
 tavily   = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
 # ────────────────────────────────────────────────
+# GEMINI RATE LIMITER (free tier: 5 RPM, 20 RPD)
+# ────────────────────────────────────────────────
+import time
+import threading
+
+_gemini_lock      = threading.Lock()
+_rpm_timestamps   = []   # timestamps of calls in last 60s
+_rpd_count        = 0    # total calls today
+RPM_LIMIT         = 5
+RPD_LIMIT         = 20
+
+def gemini_generate(prompt: str) -> str:
+    """Wrapper around model.generate_content with RPM + RPD rate limiting."""
+    global _rpd_count
+    with _gemini_lock:
+        now = time.time()
+
+        # RPD check
+        if _rpd_count >= RPD_LIMIT:
+            raise Exception(f"Gemini daily limit reached ({RPD_LIMIT} requests). Try again tomorrow.")
+
+        # RPM check — remove timestamps older than 60s
+        cutoff_min = now - 60
+        while _rpm_timestamps and _rpm_timestamps[0] < cutoff_min:
+            _rpm_timestamps.pop(0)
+
+        if len(_rpm_timestamps) >= RPM_LIMIT:
+            wait = 61 - (now - _rpm_timestamps[0])
+            print(f"Gemini RPM limit hit, waiting {wait:.1f}s...")
+            time.sleep(wait)
+            # Re-clean after sleep
+            now = time.time()
+            cutoff_min = now - 60
+            while _rpm_timestamps and _rpm_timestamps[0] < cutoff_min:
+                _rpm_timestamps.pop(0)
+
+        _rpm_timestamps.append(time.time())
+        _rpd_count += 1
+        print(f"Gemini call #{_rpd_count}/{RPD_LIMIT} today")
+
+    return model.generate_content(prompt).text.strip()
+
+# ────────────────────────────────────────────────
 # SEARCH QUERIES BY REGION
 # ────────────────────────────────────────────────
 SEARCH_QUERIES = [
@@ -325,8 +368,7 @@ async def pick_best_with_gemini(candidates: list) -> dict:
             f"{articles_text}"
             "Respond with ONLY the number (e.g.: 3). Nothing else."
         )
-        response = model.generate_content(prompt)
-        idx = int(response.text.strip().strip(".")) - 1
+        idx = int(gemini_generate(prompt).strip(".")) - 1
         if 0 <= idx < len(candidates[:10]):
             return candidates[idx]
     except Exception as e:
@@ -351,8 +393,7 @@ async def is_semantic_duplicate(candidate: dict, recent_titles: list) -> bool:
             "Same story means same event, same data, same announcement — just from a different source.\n"
             "Answer only YES or NO."
         )
-        response = model.generate_content(prompt)
-        answer = response.text.strip().upper()
+        answer = gemini_generate(prompt).upper()
         is_dup = answer.startswith("YES")
         if is_dup:
             print(f"Semantic duplicate detected: {candidate['title']}")
@@ -485,8 +526,7 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
             "Style: informative, light analysis, emojis, end with a question for discussion.\n"
             "No hashtags. Concise.\n"
         )
-        response  = model.generate_content(prompt)
-        post_text = response.text.strip()
+        post_text = gemini_generate(prompt)
 
         if not post_text.startswith(region_header):
             post_text = f"{region_header}\n\n{post_text}"
@@ -600,8 +640,7 @@ async def run_education(posted_count: int, approval_mode: bool):
             )
             expected = "Обучение"
 
-        response  = model.generate_content(prompt)
-        post_text = response.text.strip()
+        post_text = gemini_generate(prompt)
 
         if not post_text.startswith(expected):
             post_text = f"{expected}\n\n{post_text}"
