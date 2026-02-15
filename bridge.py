@@ -197,10 +197,21 @@ def tavily_search(query: str, max_results: int = 5) -> list:
             query=query,
             search_depth="basic",
             max_results=max_results,
-            days=7,
+            days=1,
         )
         results = []
+        cutoff = datetime.utcnow().timestamp() - 86400  # 24 hours ago
+        from dateutil import parser as dateparser
         for r in response.get("results", []):
+            pub_date = r.get("published_date")
+            if not pub_date:
+                continue  # skip articles with no date
+            try:
+                pub_ts = dateparser.parse(pub_date).timestamp()
+                if pub_ts < cutoff:
+                    continue  # skip articles older than 24h
+            except Exception:
+                continue  # skip articles with unparseable date
             results.append({
                 "title":   r.get("title", ""),
                 "url":     r.get("url", ""),
@@ -334,7 +345,7 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
 
     print("Searching via Tavily...")
     for search in SEARCH_QUERIES:
-        results = tavily_search(search["query"], max_results=5)
+        results = tavily_search(search["query"], max_results=10)
         for r in results:
             if is_already_posted(r["url"]):
                 continue
