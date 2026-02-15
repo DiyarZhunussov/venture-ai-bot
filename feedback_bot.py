@@ -328,7 +328,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass  # Silence request logs
 
 def run_health_server():
-    port = int(os.getenv("PORT", 8080))
+    port = int(os.getenv("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     print(f"Health check server running on port {port}")
     server.serve_forever()
@@ -336,7 +336,7 @@ def run_health_server():
 # ────────────────────────────────────────────────
 # MAIN
 # ────────────────────────────────────────────────
-def main():
+async def main():
     print("🚀 ЗАПУСК FEEDBACK BOT")
 
     # Start health check server in background thread (for Render)
@@ -354,11 +354,19 @@ def main():
     app.add_handler(CommandHandler("stats",   stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_feedback))
 
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    async with app:
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        print("Bot is running. Press Ctrl+C to stop.")
+        # Keep running forever
+        await asyncio.Event().wait()
 
 if __name__ == "__main__":
     try:
-        main()
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("Bot stopped.")
     except Exception as e:
         print(f"Feedback bot краш: {e}")
         sys.exit(1)
