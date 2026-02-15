@@ -321,34 +321,18 @@ async def add_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ошибка добавления: {str(e)}")
 
 # ────────────────────────────────────────────────
-# HEALTH CHECK SERVER (required for Render Web Service)
+# MAIN — webhook mode for Render
 # ────────────────────────────────────────────────
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import threading
+def main():
+    print("🚀 ЗАПУСК FEEDBACK BOT (webhook mode)")
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-    def log_message(self, format, *args):
-        pass  # Silence request logs
+    port      = int(os.getenv("PORT", 10000))
+    # Render provides the public URL as RENDER_EXTERNAL_URL
+    base_url  = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    webhook_url = f"{base_url}/{TELEGRAM_FEEDBACK_BOT_TOKEN}"
 
-def run_health_server():
-    port = int(os.getenv("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    print(f"Health check server running on port {port}")
-    server.serve_forever()
-
-# ────────────────────────────────────────────────
-# MAIN
-# ────────────────────────────────────────────────
-async def main():
-    print("🚀 ЗАПУСК FEEDBACK BOT")
-
-    # Start health check server in background thread (for Render)
-    health_thread = threading.Thread(target=run_health_server, daemon=True)
-    health_thread.start()
+    print(f"Webhook URL: {webhook_url}")
+    print(f"Port: {port}")
 
     app = ApplicationBuilder().token(TELEGRAM_FEEDBACK_BOT_TOKEN).build()
 
@@ -361,23 +345,18 @@ async def main():
     app.add_handler(CommandHandler("stats",   stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_feedback))
 
-    async with app:
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        print("Bot is running. Press Ctrl+C to stop.")
-        # Keep running forever
-        await asyncio.Event().wait()
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=TELEGRAM_FEEDBACK_BOT_TOKEN,
+        webhook_url=webhook_url,
+    )
 
 if __name__ == "__main__":
-    import time
-    while True:
-        try:
-            asyncio.run(main())
-        except (KeyboardInterrupt, SystemExit):
-            print("Bot stopped.")
-            break
-        except Exception as e:
-            print(f"Feedback bot error: {e}")
-            print("Restarting in 10 seconds...")
-            time.sleep(10)
+    try:
+        main()
+    except (KeyboardInterrupt, SystemExit):
+        print("Bot stopped.")
+    except Exception as e:
+        print(f"Feedback bot краш: {e}")
+        sys.exit(1)
