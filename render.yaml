@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: venture-feedback-bot
     runtime: python
     buildCommand: pip install -r requirements_feedback.txt
