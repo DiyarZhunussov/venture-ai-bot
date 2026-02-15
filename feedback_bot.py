@@ -321,15 +321,17 @@ async def add_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ошибка добавления: {str(e)}")
 
 # ────────────────────────────────────────────────
-# MAIN — webhook mode for Render
+# MAIN
 # ────────────────────────────────────────────────
-def main():
-    print("🚀 ЗАПУСК FEEDBACK BOT (webhook mode)")
+if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO)
 
     port        = int(os.getenv("PORT", 10000))
     base_url    = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
     webhook_url = f"{base_url}/{TELEGRAM_FEEDBACK_BOT_TOKEN}"
 
+    print(f"🚀 ЗАПУСК FEEDBACK BOT (webhook mode)")
     print(f"Webhook URL: {webhook_url}")
     print(f"Port: {port}")
 
@@ -348,16 +350,9 @@ def main():
     app.run_webhook(
         listen="0.0.0.0",
         port=port,
-        url_path=TELEGRAM_FEEDBACK_BOT_TOKEN,
+        secret_token="WEBHOOK_SECRET",
+        key=None,
+        cert=None,
         webhook_url=webhook_url,
         drop_pending_updates=True,
     )
-
-if __name__ == "__main__":
-    try:
-        main()
-    except (KeyboardInterrupt, SystemExit):
-        print("Bot stopped.")
-    except Exception as e:
-        print(f"Feedback bot краш: {e}")
-        sys.exit(1)
