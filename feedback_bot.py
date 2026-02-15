@@ -356,7 +356,6 @@ if __name__ == "__main__":
     app.run_webhook(
         listen="0.0.0.0",
         port=port,
-        secret_token="WEBHOOK_SECRET",
         key=None,
         cert=None,
         webhook_url=webhook_url,
