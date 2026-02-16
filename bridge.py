@@ -183,16 +183,26 @@ def is_already_posted(key: str) -> bool:
         print(f"Supabase check error: {e}")
         return False
 
-def add_to_posted(key: str, news_type: str, score: int, source_type: str):
+def add_to_posted(key: str, news_type: str, score: int, source_type: str, title: str = ""):
     try:
         supabase.table("posted_news").insert({
             "url_text":           key,
             "news_type":          news_type,
             "shareability_score": score,
             "source_type":        source_type,
+            "title":              title,
         }).execute()
     except Exception as e:
-        print(f"Failed to save to posted_news: {e}")
+        # Retry without title field in case column doesn't exist yet
+        try:
+            supabase.table("posted_news").insert({
+                "url_text":           key,
+                "news_type":          news_type,
+                "shareability_score": score,
+                "source_type":        source_type,
+            }).execute()
+        except Exception as e2:
+            print(f"Failed to save to posted_news: {e2}")
 
 def get_posted_count() -> int:
     try:
@@ -234,14 +244,20 @@ def get_recent_post_titles(limit: int = 30) -> list:
     """Get titles of recently posted/pending news for semantic duplicate detection."""
     titles = []
     try:
-        # From posted_news — get recent url_text entries (titles stored as keys)
+        # From posted_news — get title + url_text
+        # Include both English and Russian news_type values
         res = supabase.table("posted_news") \
-            .select("url_text, news_type") \
-            .eq("news_type", "NEWS") \
+            .select("url_text, title, news_type") \
+            .in_("news_type", ["NEWS", "НОВОСТЬ"]) \
             .order("created_at", desc=True) \
             .limit(limit) \
             .execute()
-        titles += [row["url_text"] for row in res.data if row.get("url_text")]
+        for row in res.data:
+            # Prefer title (human-readable), fall back to url_text
+            if row.get("title"):
+                titles.append(row["title"])
+            elif row.get("url_text"):
+                titles.append(row["url_text"])
     except:
         pass
     try:
@@ -540,7 +556,7 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
         print(f"Sent for approval. ID: {pending_id}")
     else:
         await send_to_channel(post_text, image_url, NEWS_THREAD_ID)
-        add_to_posted(best["key"], "NEWS", 8, best["region"])
+        add_to_posted(best["key"], "NEWS", 8, best["region"], title=best.get("title", ""))
         print("PUBLISHED!")
         await bot.send_message(TELEGRAM_ADMIN_ID, f"Published news:\n{post_text[:200]}...")
 
@@ -588,13 +604,13 @@ async def run_education(posted_count: int, approval_mode: bool):
                 "Requirements:\n"
                 "- Use ONLY facts and examples from the transcript above, do not invent\n"
                 "- Length: 400-700 characters\n"
-                "- Start EXACTLY with: Обучение | Activat VC\n"
+                "- Start EXACTLY with: Обучение\n"
                 "- Explain simply with concrete examples from the transcript\n"
                 "- Add emojis for readability\n"
                 f"- End with this exact line: 🎬 Смотреть урок: {youtube_url}\n"
                 "- No hashtags\n"
             )
-            expected = "Обучение | Activat VC"
+            expected = "Обучение"
         else:
             prompt = (
                 "You are the editor of a Telegram channel about venture capital in Central Asia.\n"
