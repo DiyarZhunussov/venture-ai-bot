@@ -1,55 +1,202 @@
 import os
 import sys
 import asyncio
-import requests as http_requests
+import requests
+from datetime import datetime
 from supabase import create_client, Client
-from telegram import Update, Bot
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+from groq import Groq
+from telegram import Bot
+from telegram.error import TelegramError
+from tavily import TavilyClient
 
 # ────────────────────────────────────────────────
 # ENVIRONMENT VARIABLES
 # ────────────────────────────────────────────────
-TELEGRAM_FEEDBACK_BOT_TOKEN = os.getenv("TELEGRAM_FEEDBACK_BOT_TOKEN")
-TELEGRAM_BOT_TOKEN          = os.getenv("TELEGRAM_BOT_TOKEN")       # main bot — for publishing
-TELEGRAM_ADMIN_ID           = os.getenv("TELEGRAM_ADMIN_ID")
-TELEGRAM_CHAT_ID            = os.getenv("TELEGRAM_CHAT_ID")         # the channel
-SUPABASE_URL                = os.getenv("SUPABASE_URL")
-SUPABASE_KEY                = os.getenv("SUPABASE_KEY")
-NEWS_THREAD_ID              = os.getenv("TELEGRAM_NEWS_THREAD_ID")
-EDUCATION_THREAD_ID         = os.getenv("TELEGRAM_EDUCATION_THREAD_ID")
+GROQ_API_KEY        = os.getenv("GROQ_API_KEY")
+TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_ADMIN_ID   = os.getenv("TELEGRAM_ADMIN_ID")
+SUPABASE_URL        = os.getenv("SUPABASE_URL")
+SUPABASE_KEY        = os.getenv("SUPABASE_KEY")
+UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
+TAVILY_API_KEY      = os.getenv("TAVILY_API_KEY")
+POST_TYPE           = os.getenv("POST_TYPE", "news")
 
-if not all([TELEGRAM_FEEDBACK_BOT_TOKEN, TELEGRAM_ADMIN_ID, SUPABASE_URL, SUPABASE_KEY,
-            TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
-    print("❌ Missing required environment variables for feedback bot.")
+# Supergroup topic thread IDs (optional)
+NEWS_THREAD_ID      = os.getenv("TELEGRAM_NEWS_THREAD_ID")
+EDUCATION_THREAD_ID = os.getenv("TELEGRAM_EDUCATION_THREAD_ID")
+
+if not all([GROQ_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SUPABASE_URL, SUPABASE_KEY]):
+    print("Missing required environment variables.")
     sys.exit(1)
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-ADMIN_ID         = int(TELEGRAM_ADMIN_ID)
-main_bot         = Bot(token=TELEGRAM_BOT_TOKEN)  # used to publish to channel
+if not TAVILY_API_KEY:
+    print("Warning: TAVILY_API_KEY not set. News search will fail.")
 
 # ────────────────────────────────────────────────
-# HELPERS
+# INITIALIZATION
 # ────────────────────────────────────────────────
-def add_to_posted(url_or_text: str, news_type: str, score: int, source_type: str, title: str = ""):
+groq_client = Groq(api_key=GROQ_API_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+bot      = Bot(token=TELEGRAM_BOT_TOKEN)
+tavily   = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
+
+# ────────────────────────────────────────────────
+# GROQ LLM WRAPPER
+# ────────────────────────────────────────────────
+
+def gemini_generate(prompt: str) -> str:
+    """Call Groq API with llama-3.3-70b. Drop-in replacement for Gemini."""
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1024,
+        temperature=0.7,
+    )
+    return response.choices[0].message.content.strip()
+
+# ────────────────────────────────────────────────
+# SEARCH QUERIES BY REGION
+# ────────────────────────────────────────────────
+SEARCH_QUERIES = [
+    # Kazakhstan (highest priority)
+    {"query": "стартапы венчурные инвестиции Казахстан 2026",        "region": "Kazakhstan",  "priority": 0},
+    {"query": "Kazakhstan startup venture capital funding 2026",      "region": "Kazakhstan",  "priority": 0},
+    {"query": "Казахстан венчурный фонд раунд стартап",              "region": "Kazakhstan",  "priority": 0},
+
+    # Central Asia
+    {"query": "стартапы венчурные инвестиции Центральная Азия 2026", "region": "CentralAsia", "priority": 1},
+    {"query": "Central Asia startup investment funding 2026",         "region": "CentralAsia", "priority": 1},
+    {"query": "Узбекистан Кыргызстан стартап венчур инвестиции",     "region": "CentralAsia", "priority": 1},
+
+    # World — Tier-1 VC/tech only
+    {"query": "OpenAI Anthropic NVIDIA Google major AI funding 2026", "region": "World",       "priority": 2},
+    {"query": "top venture capital deal Series A B C funding 2026",   "region": "World",       "priority": 2},
+    {"query": "startup unicorn IPO major investment news 2026",       "region": "World",       "priority": 2},
+]
+
+REGION_HEADER = {
+    "Kazakhstan":  "Kazakhstan",
+    "CentralAsia": "Central Asia",
+    "World":       "World",
+}
+
+# ────────────────────────────────────────────────
+# ACTIVAT VC LESSONS
+# ────────────────────────────────────────────────
+ACTIVAT_LESSONS = [
+    {
+        "title": "Что такое инвестиции и их параметры",
+        "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy",
+        "youtube_url": "https://youtu.be/RLWjDv7Hto4",
+        "transcript": """Инвестиции — вложение средств в активы с целью сохранения и приумножения капитала. Три основных параметра: доходность, надёжность и ликвидность. Доходность = сумма дохода за год / сумма вложения × 100%. Депозит даёт ~12% годовых, но курс валюты влияет: при падении тенге доходность может вырасти до 22%, при росте — упасть до 2%. Недвижимость: аренда 12% + рост стоимости 10% = 22% годовых, при падении цен — всего 2%. Бизнес: первые выплаты — это возврат вложений, а не прибыль; за 3 года доходность составит лишь 2.7% годовых. Надёжность: депозит ~100%, недвижимость ~70%, бизнес ~0%. Ликвидность = 1 / количество дней на продажу: деньги — 100%, депозит — 33% (3 дня), квартира — 1% (3 месяца), антиквариат — 0.27%."""
+    },
+    {
+        "title": "Что такое стартап",
+        "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy",
+        "youtube_url": "https://youtu.be/_FhExnc4bgA",
+        "transcript": """Стартап — это даже не компания, а проект одного или нескольких человек, которые ищут идею. Признаки стартапа: 1) Юность — компания работает менее 3-5 лет по одной бизнес-модели. 2) Новизна идеи — не расширение существующего бизнеса, а принципиально новый подход. Пример: основатели Uber не открыли ещё один таксопарк, а придумали приложение без таксопарков — выбор маршрута, оплата, оценки. 3) Масштабируемость — способность расти многократно в короткий срок; традиционный бизнес даёт максимум 30-40% прибыли в год. 4) Технологичность — IT-продукт (программа, сайт, приложение), один программист может создать продукт без заводов и оборудования. 5) Большой рынок — возможность расширяться на огромные территории."""
+    },
+    {
+        "title": "Инвестиционный портфель инвестора",
+        "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy",
+        "youtube_url": "https://youtu.be/mLKvHpnoGcg",
+        "transcript": """Инвестиционный портфель со средним аппетитом к риску: 20% — депозиты (баланс тенге и валюты снижает валютный риск), 30% — недвижимость (Алматы и Астана для аренды, часть в Дубае или Турции для снижения политических рисков), 20% — фондовый рынок (гособлигации США — надёжно, акции S&P 500 — доходнее). Такое распределение балансирует сохранение капитала и доходность через диверсификацию по инструментам и географии."""
+    },
+    {
+        "title": "Что такое венчурные инвестиции",
+        "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy",
+        "youtube_url": "https://youtu.be/-850n7Yu8aA",
+        "transcript": """Venture — «рискованный» по-английски. Венчурные инвестиции — рискованные вложения в стартапы. Стартапы имеют высокую смертность, поэтому на венчур рекомендуется выделять не более 5-10% портфеля. Главный плюс: один успешный стартап может окупить вложения в остальные 10, давая инвесторам иксы — кратное увеличение стоимости. Этого не может дать традиционный бизнес. Пример: Uber придумал приложение без таксопарков вместо того, чтобы открыть ещё один таксопарк."""
+    },
+    {
+        "title": "Путь венчурного инвестора: от частника до бизнес-ангела",
+        "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy",
+        "youtube_url": "https://youtu.be/ZPTmrEZSunA",
+        "transcript": """Путь венчурного инвестора: 1) Начинающий частный инвестор — есть деньги, нет опыта, стартапы находит случайно (соцсети, мероприятия), инвестирует только деньгами. 2) Пассивный инвестор в синдикате — присоединяется к фондам или клубам, учится у опытных. 3) Бизнес-ангел — появляется опыт и «насмотренность», видит типичные ошибки стартапов, может давать советы и быть ментором. Даёт «умные деньги»: деньги + знания + опыт + связи. Особенно ценен, если ранее работал в корпорации или был предпринимателем."""
+    },
+    {
+        "title": "Супер-ангел и инвестиционная компания",
+        "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy",
+        "youtube_url": "https://youtu.be/yVvhxXF8htI",
+        "transcript": """Бизнес-ангел может пойти двумя путями. 1) Стать супер-ангелом — работать индивидуально, но оперировать всё большими суммами, принимая решения единолично на основе опыта и интуиции. 2) Создать инвестиционную компанию — нанять экспертов в маркетинге, юриспруденции, финансах; выстроить инвестиционный комитет и воронку продаж. В компании решения принимаются коллегиально — это повышает качество. Компания привлекает деньги других инвесторов и обрастает сообществом."""
+    },
+    {
+        "title": "Где искать стартапы и как инвестировать: одному или в группе",
+        "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy",
+        "youtube_url": "https://youtu.be/suP2UjGu-H0",
+        "transcript": """Каналы поиска стартапов: 1) Google, 2) соцсети (LinkedIn, Facebook — стартаперы публикуют прогресс), 3) Demo Day акселераторов и инкубаторов, 4) нетворкинг. Инвестировать можно самостоятельно (свобода, но сложный поиск, ограниченный бюджет, нужны знания маркетинга и продукта) или в составе клуба/компании (готовая воронка стартапов с CRM, коллективная экспертиза, возможность начинать с малых чеков, профессиональный мониторинг после инвестирования)."""
+    },
+    {
+        "title": "Что обсудить с основателем перед инвестированием",
+        "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy",
+        "youtube_url": "https://youtu.be/foP0b8FUM80",
+        "transcript": """Перед инвестированием обязательно обсудите: 1) Сумма — зафиксировать в конкретной валюте. 2) Сроки — когда именно переводятся деньги (конфликты из-за этого очень часты). 3) Условия поэтапных выплат — привязать транши к KPI (охват, выручка, клиенты). 4) Доля инвестора = сумма инвестиций / оценка стоимости компании; оценка — главный источник споров, для этого используют SAFE и конвертируемые займы. 5) Степень участия в управлении — войти в совет директоров или остаться пассивным инвестором."""
+    },
+    {
+        "title": "Виды и формы инвестиций",
+        "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy",
+        "youtube_url": "https://youtu.be/F84ihxh9wiA",
+        "transcript": """Виды инвестиций по срокам: краткосрочные (до 1 года), среднесрочные (1-3 года), долгосрочные (от 3 лет). По формам: 1) Прямые — вход в долю компании (Cash-in: деньги в компанию; Cash-out: деньги продавцу). 2) Венчурные — на ранних стадиях (pre-seed), самые рискованные. 3) Частные — физлицо или группа покупает долю/акции. 4) Инвестиционные фонды — профессиональное управление. 5) Корпоративные — крупные компании покупают стартапы для роста или новых рынков. 6) Краудфандинг — лендинговый (займ без доли) или инвестиционный (с долей)."""
+    },
+    {
+        "title": "Способы инвестирования в бизнес",
+        "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy",
+        "youtube_url": "https://youtu.be/4RAFsA3Jm3E",
+        "transcript": """Способы инвестирования: 1) Прямые инвестиции — покупка доли (Cash-in или Cash-out). 2) Договор простого товарищества — объединение вкладов без создания юрлица; прибыль делится по договору, инвестор не влияет на решения. 3) Венчурные фонды — привлекают средства нескольких инвесторов. 4) Инвестиционные фонды — профессиональное управление. 5) Краудфандинг — минимальный чек устанавливает площадка. 6) Ангельское инвестирование — чеки до $50 000. 7) Корпоративное — крупная компания выкупает стартап для присоединения к своему бизнесу."""
+    },
+    {
+        "title": "Процесс инвестирования в стартап",
+        "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy",
+        "youtube_url": "https://youtu.be/12JaOwIvygg",
+        "transcript": """Процесс инвестирования: 1) Определить цели — срок, ожидаемая доходность. 2) Найти стартапы. 3) Due Diligence — комплексная проверка: экономическая, юридическая, маркетинговая, анализ рынка. Качество DD определяет успех инвестиции. 4) Переговоры с основателями — условия фиксируются в term sheet и инвестиционных соглашениях. 5) Передача средств. 6) Мониторинг — отслеживание расходования средств, отчётность, меры при отклонениях от плана."""
+    },
+    {
+        "title": "Условия выхода инвестора из стартапа",
+        "url": "https://activat.vc/startup-course/lesson/kakoi-put-prohodyat-startapy",
+        "youtube_url": "https://youtu.be/oSCxm08Nu7U",
+        "transcript": """Выход — важнейший вопрос, который нужно обсудить «на берегу». Сценарии: 1) Следующий раунд — новый инвестор выкупает акции у предыдущих; стоимость вырастает, инвестор получает иксы. 2) Поглощение крупной компанией — вся компания переходит новому владельцу. Риск: корпорация может купить только 51% у фаундера, а первый инвестор остаётся «никем». 3) Опцион — стартап сам выкупает долю у инвестора. 4) Продажа доли стороннему инвестору между раундами — важно приоритетное право покупки действующих акционеров (закреплено законом в Казахстане). 5) Банкротство — инвестор стоит последним в очереди. Все сценарии нужно прописать заранее."""
+    },
+]
+
+GLOBAL_EDUCATION_TOPICS = [
+    "Как работает венчурный капитал: объяснение для фаундеров",
+    "Разница между pre-seed, seed и Series A раундами",
+    "Как считать runway и burn rate стартапа",
+    "Vesting и cliff: опционная программа для команды",
+    "Bootstrapping vs венчурное финансирование",
+    "Как работают акселераторы и чем отличаются от инкубаторов",
+    "Что такое convertible note и SAFE",
+    "Как венчурные фонды зарабатывают (модель 2-20)",
+    "CAC и LTV: юнит-экономика для инвесторов",
+    "Как подготовиться к питчу перед венчурным инвестором",
+]
+
+# ────────────────────────────────────────────────
+# SUPABASE HELPERS
+# ────────────────────────────────────────────────
+def is_already_posted(key: str) -> bool:
+    try:
+        res = supabase.table("posted_news").select("id").eq("url_text", key).execute()
+        return len(res.data) > 0
+    except Exception as e:
+        print(f"Supabase check error: {e}")
+        return False
+
+def add_to_posted(key: str, news_type: str, score: int, source_type: str, title: str = ""):
     try:
         supabase.table("posted_news").insert({
-            "url_text":           url_or_text,
+            "url_text":           key,
             "news_type":          news_type,
             "shareability_score": score,
             "source_type":        source_type,
             "title":              title,
         }).execute()
     except Exception as e:
-        # Retry without title in case column doesn't exist yet
+        # Retry without title field in case column doesn't exist yet
         try:
             supabase.table("posted_news").insert({
-                "url_text":           url_or_text,
+                "url_text":           key,
                 "news_type":          news_type,
                 "shareability_score": score,
                 "source_type":        source_type,
@@ -57,322 +204,529 @@ def add_to_posted(url_or_text: str, news_type: str, score: int, source_type: str
         except Exception as e2:
             print(f"Failed to save to posted_news: {e2}")
 
-def add_negative_constraint(feedback: str):
+def get_posted_count() -> int:
     try:
-        res = supabase.table("negative_constraints").insert({"feedback": feedback}).execute()
+        res = supabase.table("posted_news").select("count", count="exact").execute()
+        return res.count or 0
+    except:
+        return 999
+
+def get_education_count() -> int:
+    try:
+        res = supabase.table("posted_news").select("count", count="exact").eq("news_type", "EDUCATION").execute()
+        return res.count or 0
+    except:
+        return 0
+
+def save_pending_post(candidate: dict, post_text: str, image_url) -> str:
+    try:
+        res = supabase.table("pending_posts").insert({
+            "title":     candidate.get("title", ""),
+            "url":       candidate.get("url", ""),
+            "post_text": post_text,
+            "image_url": image_url or "",
+            "region":    candidate.get("region", ""),
+            "status":    "pending",
+        }).execute()
         return res.data[0]["id"]
     except Exception as e:
-        print(f"Failed to add negative constraint: {e}")
+        print(f"Failed to save pending post: {e}")
         return None
 
-# ────────────────────────────────────────────────
-# /start
-# ────────────────────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Доступ запрещён.")
-        return
+def fetch_negative_constraints() -> list:
+    try:
+        res = supabase.table("negative_constraints").select("feedback").execute()
+        return [row["feedback"].lower() for row in res.data]
+    except:
+        return []
 
-    text = (
-        "👋 Бот управления постами\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "ОДОБРЕНИЕ ПОСТОВ (первые 100):\n"
-        "• /approve <id> — опубликовать пост\n"
-        "• /reject <id> <причина> — отклонить и запомнить причину\n\n"
-        "АНТИ-КЕЙСЫ:\n"
-        "• Просто напиши текст — добавит новый анти-кейс\n"
-        "• /list — все анти-кейсы\n"
-        "• /delete <id> — удалить анти-кейс\n\n"
-        "СТАТИСТИКА:\n"
-        "• /stats — статистика системы\n"
-        "• /pending — посмотреть посты, ожидающие одобрения\n"
-        "━━━━━━━━━━━━━━━━━━━━"
-    )
-    await update.message.reply_text(text)
+def get_recent_post_titles(limit: int = 30) -> list:
+    """Get titles of recently posted/pending news for semantic duplicate detection."""
+    titles = []
+    try:
+        # From posted_news — get title + url_text
+        # Include both English and Russian news_type values
+        res = supabase.table("posted_news") \
+            .select("url_text, title, news_type") \
+            .in_("news_type", ["NEWS", "НОВОСТЬ"]) \
+            .order("created_at", desc=True) \
+            .limit(limit) \
+            .execute()
+        for row in res.data:
+            # Prefer title (human-readable), fall back to url_text
+            if row.get("title"):
+                titles.append(row["title"])
+            elif row.get("url_text"):
+                titles.append(row["url_text"])
+    except:
+        pass
+    try:
+        # Also check pending posts that haven't been approved yet
+        res2 = supabase.table("pending_posts") \
+            .select("title, url") \
+            .eq("status", "pending") \
+            .order("created_at", desc=True) \
+            .limit(10) \
+            .execute()
+        for row in res2.data:
+            if row.get("title"):
+                titles.append(row["title"])
+            if row.get("url"):
+                titles.append(row["url"])
+    except:
+        pass
+    return titles
 
 # ────────────────────────────────────────────────
-# /approve <pending_id>  — publish the post
+# TAVILY SEARCH
 # ────────────────────────────────────────────────
-async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
+def tavily_search(query: str, max_results: int = 5) -> list:
+    if not tavily:
+        return []
+    try:
+        response = tavily.search(
+            query=query,
+            search_depth="basic",
+            max_results=max_results,
+            days=3,
+        )
+        results = []
+        cutoff = datetime.utcnow().timestamp() - 86400 * 3  # 3 days ago
+        from dateutil import parser as dateparser
+        # Domains that are aggregators/databases (not news) — always stale
+        BLOCKED_DOMAINS = [
+            "tracxn.com", "crunchbase.com", "pitchbook.com",
+            "statista.com", "similarweb.com", "dealroom.co",
+        ]
 
-    if not context.args:
-        await update.message.reply_text("Использование: /approve <id>")
-        return
+        for r in response.get("results", []):
+            url = r.get("url", "")
 
-    pending_id = context.args[0].strip()
+            # Block known aggregator/database sites
+            if any(domain in url for domain in BLOCKED_DOMAINS):
+                print(f"Blocked aggregator: {url}")
+                continue
+
+            pub_date = r.get("published_date")
+            if pub_date:
+                try:
+                    pub_ts = dateparser.parse(pub_date).timestamp()
+                    if pub_ts < cutoff:
+                        print(f"Too old ({pub_date}): {url}")
+                        continue  # skip articles older than 3 days
+                except Exception:
+                    pass  # keep if date unparseable
+            else:
+                # No date = likely an evergreen page, not news — skip
+                print(f"No pub_date, skipping: {url}")
+                continue
+
+            results.append({
+                "title":    r.get("title", ""),
+                "url":      url,
+                "snippet":  r.get("content", "")[:400],
+                "pub_date": pub_date or "",
+            })
+        return results
+    except Exception as e:
+        print(f"Tavily search error: {e}")
+        return []
+
+# ────────────────────────────────────────────────
+# VC RELEVANCE KEYWORD FILTER
+# ────────────────────────────────────────────────
+VC_KEYWORDS = [
+    "стартап", "венчур", "инвестиц", "раунд", "фонд",
+    "startup", "venture", "funding", "investment", "investor",
+    "series a", "series b", "series c", "seed", "pre-seed",
+    "ipo", "unicorn", "единорог", "акселератор", "accelerator",
+    "openai", "anthropic", "nvidia", "sequoia", "a16z", "y combinator",
+    "techcrunch", "fintech", "edtech", "healthtech", "saas", "pitch",
+]
+
+def is_vc_relevant(title: str, snippet: str, negative_rules: list) -> bool:
+    content = (title + " " + snippet).lower()
+    if any(rule in content for rule in negative_rules):
+        return False
+    return any(kw in content for kw in VC_KEYWORDS)
+
+# ────────────────────────────────────────────────
+# GEMINI: PICK BEST ARTICLE
+# ────────────────────────────────────────────────
+async def pick_best_with_gemini(candidates: list) -> dict:
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    articles_text = ""
+    for i, c in enumerate(candidates[:10]):
+        articles_text += f"{i+1}. [{c['region']}] {c['title']}\n   {c['snippet']}\n\n"
 
     try:
-        res = supabase.table("pending_posts").select("*").eq("id", pending_id).execute()
-        if not res.data:
-            await update.message.reply_text("❌ Пост не найден.")
-            return
+        prompt = (
+            "You are a venture capital news editor for a Central Asian VC Telegram channel.\n"
+            "From this list, pick ONE article MOST relevant to startups and venture capital.\n"
+            "Must be about: startup funding, VC fund news, major tech AI strategy "
+            "(OpenAI/Anthropic/NVIDIA/Google), startup ecosystem, or venture market trends.\n"
+            "Do NOT pick: consumer finance, personal taxes, sports, politics, general business.\n\n"
+            f"{articles_text}"
+            "Respond with ONLY the number (e.g.: 3). Nothing else."
+        )
+        idx = int(gemini_generate(prompt).strip(".")) - 1
+        if 0 <= idx < len(candidates[:10]):
+            return candidates[idx]
+    except Exception as e:
+        print(f"Gemini pick error: {e}")
 
-        post = res.data[0]
-        if post["status"] != "pending":
-            await update.message.reply_text(f"Пост уже обработан (статус: {post['status']}).")
-            return
+    return candidates[0]
 
-        post_text = post["post_text"]
-        image_url = post.get("image_url", "")
-        url_key   = post.get("url") or post_text[:100]
-        region    = post.get("region", "Мир")
+# ────────────────────────────────────────────────
+# GEMINI: SEMANTIC DUPLICATE CHECK
+# ────────────────────────────────────────────────
+async def is_semantic_duplicate(candidate: dict, recent_titles: list) -> bool:
+    """Check if this story was already covered recently (same story, different source)."""
+    if not recent_titles:
+        return False
+    try:
+        recent_text = "\n".join(str(t) for t in recent_titles[:20])
+        prompt = (
+            f"New article title: {candidate['title']}\n"
+            f"New article snippet: {candidate['snippet'][:200]}\n\n"
+            f"Recently published articles/URLs:\n{recent_text}\n\n"
+            "Is the new article covering the SAME news story as any of the recent ones? "
+            "Same story means same event, same data, same announcement — just from a different source.\n"
+            "Answer only YES or NO."
+        )
+        answer = gemini_generate(prompt).upper()
+        is_dup = answer.startswith("YES")
+        if is_dup:
+            print(f"Semantic duplicate detected: {candidate['title']}")
+        return is_dup
+    except Exception as e:
+        print(f"Duplicate check error: {e}")
+        return False
 
-        # Determine thread ID based on region
-        if region == "Education":
-            thread_id = int(EDUCATION_THREAD_ID) if EDUCATION_THREAD_ID else None
+# ────────────────────────────────────────────────
+# TELEGRAM SEND (supports supergroup topics)
+# ────────────────────────────────────────────────
+async def send_to_channel(text: str, image_url: str, thread_id: str = None):
+    kwargs = {"chat_id": TELEGRAM_CHAT_ID}
+    if thread_id:
+        kwargs["message_thread_id"] = int(thread_id)
+
+    try:
+        if image_url:
+            await bot.send_photo(
+                photo=image_url,
+                caption=text,
+                parse_mode="HTML" if "<" in text else None,
+                **kwargs
+            )
         else:
-            thread_id = int(NEWS_THREAD_ID) if NEWS_THREAD_ID else None
-
-        print(f"DEBUG: region={region}, NEWS_THREAD_ID={NEWS_THREAD_ID}, EDUCATION_THREAD_ID={EDUCATION_THREAD_ID}, thread_id={thread_id}, chat_id={TELEGRAM_CHAT_ID}")
-
-        # Build kwargs for send
-        send_kwargs = {"chat_id": TELEGRAM_CHAT_ID}
-        if thread_id:
-            send_kwargs["message_thread_id"] = thread_id
-
-        # Publish to channel using the main bot
-        # Try with image first, fall back to text-only if image fails
-        published = False
+            await bot.send_message(
+                text=text,
+                disable_web_page_preview=False,
+                **kwargs
+            )
+    except TelegramError as te:
+        print(f"Telegram error: {te}")
+        # Retry without image if image failed
         if image_url:
             try:
-                await main_bot.send_photo(
-                    photo=image_url,
-                    caption=post_text,
-                    parse_mode="HTML" if "<" in post_text else None,
-                    **send_kwargs
+                await bot.send_message(
+                    text=text,
+                    disable_web_page_preview=False,
+                    **kwargs
                 )
-                published = True
-            except Exception as img_err:
-                print(f"Image send failed ({img_err}), falling back to text-only.")
-
-        if not published:
-            await main_bot.send_message(
-                text=post_text,
-                disable_web_page_preview=False,
-                **send_kwargs
-            )
-
-        # Mark as approved in pending_posts
-        supabase.table("pending_posts").update({"status": "approved"}).eq("id", pending_id).execute()
-
-        # Record in posted_news (for dedup + count)
-        news_type  = "EDUCATION" if region == "Education" else "NEWS"
-        post_title = post.get("title", "")
-        add_to_posted(url_key, news_type, 8, region, title=post_title)
-
-        await update.message.reply_text(f"✅ Пост опубликован!\n\n{post_text[:200]}...")
-
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка публикации: {str(e)}")
+            except TelegramError as te2:
+                print(f"Retry also failed: {te2}")
+                await bot.send_message(TELEGRAM_ADMIN_ID, f"Send error: {str(te2)}")
 
 # ────────────────────────────────────────────────
-# /reject <pending_id> <reason>  — skip + learn
+# NEWS POST LOGIC (08:00)
 # ────────────────────────────────────────────────
-async def reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+async def run_news(posted_count: int, approval_mode: bool, negative_rules: list):
+    print("MODE: NEWS (08:00)")
+
+    all_candidates = []
+
+    print("Searching via Tavily...")
+    for search in SEARCH_QUERIES:
+        results = tavily_search(search["query"], max_results=10)
+        for r in results:
+            if is_already_posted(r["url"]):
+                continue
+            if not is_vc_relevant(r["title"], r["snippet"], negative_rules):
+                continue
+            all_candidates.append({
+                "title":    r["title"],
+                "url":      r["url"],
+                "snippet":  r["snippet"],
+                "region":   search["region"],
+                "priority": search["priority"],
+                "key":      r["url"],
+            })
+
+    # Deduplicate by URL
+    seen = set()
+    unique = []
+    for c in all_candidates:
+        if c["url"] not in seen:
+            seen.add(c["url"])
+            unique.append(c)
+    all_candidates = unique
+
+    print(f"Candidates after filter: {len(all_candidates)}")
+
+    if not all_candidates:
+        print("No suitable news found.")
+        await bot.send_message(TELEGRAM_ADMIN_ID, "Main Bot: No suitable news found today.")
         return
 
-    if not context.args:
-        await update.message.reply_text("Использование: /reject <id> <причина>")
-        return
+    # Sort by region priority
+    all_candidates.sort(key=lambda c: c["priority"])
 
-    pending_id = context.args[0].strip()
-    reason     = " ".join(context.args[1:]).strip() if len(context.args) > 1 else ""
+    # Load recent posts for semantic duplicate check
+    recent_titles = get_recent_post_titles()
+    print(f"Loaded {len(recent_titles)} recent post titles for duplicate check.")
 
-    try:
-        res = supabase.table("pending_posts").select("*").eq("id", pending_id).execute()
-        if not res.data:
-            await update.message.reply_text("❌ Пост не найден.")
-            return
+    # Try candidates until we find one that isn't a semantic duplicate
+    best = None
+    remaining = list(all_candidates)
 
-        post = res.data[0]
-        if post["status"] != "pending":
-            await update.message.reply_text(f"Пост уже обработан (статус: {post['status']}).")
-            return
+    while remaining:
+        candidate = await pick_best_with_gemini(remaining)
+        if not candidate:
+            break
 
-        # Mark as rejected
-        supabase.table("pending_posts").update({"status": "rejected"}).eq("id", pending_id).execute()
-
-        # Auto-learn: if a reason was given, save it as an anti-case
-        reply_lines = [f"❌ Пост отклонён."]
-        if reason:
-            constraint_id = add_negative_constraint(reason)
-            reply_lines.append(f"📚 Причина сохранена как анти-кейс: «{reason}»")
-            reply_lines.append(f"(ID анти-кейса: {constraint_id})")
+        if not await is_semantic_duplicate(candidate, recent_titles):
+            best = candidate
+            break
         else:
-            reply_lines.append("💡 Совет: укажи причину после ID, чтобы бот запомнил её.")
-            reply_lines.append("Пример: /reject <id> новости о крипте не нужны")
+            # Remove this duplicate and try next best
+            remaining = [c for c in remaining if c["url"] != candidate["url"]]
+            print(f"Skipping duplicate, {len(remaining)} candidates left.")
 
-        await update.message.reply_text("\n".join(reply_lines))
-
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка: {str(e)}")
-
-# ────────────────────────────────────────────────
-# /pending  — list posts awaiting approval
-# ────────────────────────────────────────────────
-async def pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if not best:
+        print("All candidates are semantic duplicates of recent posts.")
+        await bot.send_message(
+            TELEGRAM_ADMIN_ID,
+            "Main Bot: All top candidates are duplicates of recent stories. No post today."
+        )
         return
 
+    print(f"Selected [{best['region']}]: {best['title']}")
+    region_header = REGION_HEADER.get(best["region"], best["region"])
+
     try:
-        res = supabase.table("pending_posts").select("id, title, region, created_at, status") \
-            .eq("status", "pending").order("created_at", desc=True).execute()
+        prompt = (
+            "You are the editor of a Telegram channel about venture capital in Central Asia.\n"
+            "Write a news post in RUSSIAN based strictly on this article.\n\n"
+            f"Title: {best['title']}\n"
+            f"Content: {best['snippet']}\n"
+            f"URL: {best['url']}\n\n"
+            f"IMPORTANT: Start the post EXACTLY with: {region_header}\n"
+            "Then a blank line, then the post.\n\n"
+            "Post structure:\n"
+            "1. One sentence — what happened (who, what, how much/many)\n"
+            "2. 2-3 key facts or numbers directly from the article\n"
+            "3. One sentence — why this matters for Central Asian startups or investors\n\n"
+            "Rules:\n"
+            "- 400-700 characters total\n"
+            "- Use ONLY facts from the article above, do NOT invent anything\n"
+            "- Add emojis for readability\n"
+            "- NO questions at the end\n"
+            "- No hashtags\n"
+        )
+        post_text = gemini_generate(prompt)
 
-        if not res.data:
-            await update.message.reply_text("Нет постов, ожидающих одобрения. ✅")
+        if not post_text.startswith(region_header):
+            post_text = f"{region_header}\n\n{post_text}"
+
+        # Always append source link
+        post_text = f"{post_text}\n\n{best['url']}"
+
+        # Try og:image
+        image_url = None
+        try:
+            from bs4 import BeautifulSoup
+            page = requests.get(best["url"], timeout=8)
+            soup = BeautifulSoup(page.text, "lxml")
+            img  = soup.find("meta", property="og:image")
+            if img and img.get("content"):
+                image_url = img["content"]
+        except:
+            pass
+
+        print(f"Post ready ({len(post_text)} chars)")
+
+    except Exception as e:
+        print(f"Gemini error: {e}")
+        await bot.send_message(TELEGRAM_ADMIN_ID, f"Gemini error: {str(e)}")
+        return
+
+    if approval_mode:
+        pending_id = save_pending_post(best, post_text, image_url)
+        if not pending_id:
+            await bot.send_message(TELEGRAM_ADMIN_ID, "Failed to save post for approval.")
             return
+        preview = (
+            f"NEWS POST FOR APPROVAL (#{posted_count + 1}/100)\n"
+            f"--------------------\n"
+            f"{post_text}\n"
+            f"--------------------\n"
+            f"Approve: /approve {pending_id}\n"
+            f"Reject:  /reject {pending_id} reason here"
+        )
+        await bot.send_message(TELEGRAM_ADMIN_ID, preview)
+        print(f"Sent for approval. ID: {pending_id}")
+    else:
+        await send_to_channel(post_text, image_url, NEWS_THREAD_ID)
+        add_to_posted(best["key"], "NEWS", 8, best["region"], title=best.get("title", ""))
+        print("PUBLISHED!")
+        await bot.send_message(TELEGRAM_ADMIN_ID, f"Published news:\n{post_text[:200]}...")
 
-        lines = ["📋 Посты на одобрении:\n"]
-        for row in res.data:
-            dt     = row["created_at"].split("T")[0]
-            lines.append(
-                f"• [{row['region']}] {row['title'][:60]}…\n"
-                f"  {dt}\n"
-                f"  /approve {row['id']}\n"
-                f"  /reject {row['id']} <причина>\n"
+# ────────────────────────────────────────────────
+# EDUCATION POST LOGIC (17:00)
+# Even count = Activat VC lesson, Odd count = global topic
+# ────────────────────────────────────────────────
+async def run_education(posted_count: int, approval_mode: bool):
+    print("MODE: EDUCATION (17:00)")
+
+    edu_count   = get_education_count()
+    use_activat = (edu_count % 2 == 0)  # Activat, Global, Activat, Global...
+
+    if use_activat:
+        idx         = (edu_count // 2) % len(ACTIVAT_LESSONS)
+        lesson      = ACTIVAT_LESSONS[idx]
+        topic       = lesson["title"]
+        youtube_url = lesson["youtube_url"]
+        dedup_key   = f"activat_{topic[:60]}"
+        print(f"Activat VC lesson #{idx}: {topic} | {youtube_url}")
+    else:
+        idx         = (edu_count // 2) % len(GLOBAL_EDUCATION_TOPICS)
+        topic       = GLOBAL_EDUCATION_TOPICS[idx]
+        youtube_url = ""
+        dedup_key   = f"edu_global_{topic[:60]}"
+        print(f"Global topic #{idx}: {topic}")
+
+    if is_already_posted(dedup_key):
+        print(f"Topic already used: {topic}")
+        await bot.send_message(TELEGRAM_ADMIN_ID, "Education: topic already used, skipping.")
+        return
+
+    # Use stored transcript from ACTIVAT_LESSONS
+    lesson_transcript = lesson.get("transcript", "") if use_activat else ""
+    if use_activat:
+        print(f"Using stored transcript: {len(lesson_transcript)} chars")
+
+    try:
+        if use_activat:
+            prompt = (
+                "You are the editor of a Telegram channel about venture capital in Central Asia.\n"
+                "Write a short educational post in RUSSIAN based ONLY on this lesson transcript.\n\n"
+                f"Topic: \"{topic}\"\n\n"
+                f"Transcript:\n{lesson_transcript}\n\n"
+                "Requirements:\n"
+                "- Use ONLY facts and examples from the transcript above, do not invent\n"
+                "- Length: 400-700 characters\n"
+                "- Start EXACTLY with: Обучение\n"
+                "- Explain simply with concrete examples from the transcript\n"
+                "- Add emojis for readability\n"
+                f"- End with this exact line: 🎬 Смотреть урок: {youtube_url}\n"
+                "- No hashtags\n"
             )
-
-        await update.message.reply_text("\n".join(lines))
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка: {str(e)}")
-
-# ────────────────────────────────────────────────
-# /list — show all anti-cases
-# ────────────────────────────────────────────────
-async def list_feedbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    try:
-        res = supabase.table("negative_constraints").select("id, feedback, created_at") \
-            .order("created_at", desc=True).execute()
-        if not res.data:
-            await update.message.reply_text("Анти-кейсов пока нет.")
-            return
-
-        lines = ["📋 Анти-кейсы:\n"]
-        for row in res.data:
-            dt = row["created_at"].split("T")[0]
-            lines.append(f"• {dt} | {row['feedback'][:80]}\n  ID: {row['id']}")
-
-        await update.message.reply_text("\n".join(lines))
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка: {str(e)}")
-
-# ────────────────────────────────────────────────
-# /delete <id>
-# ────────────────────────────────────────────────
-async def delete_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    if not context.args:
-        await update.message.reply_text("Использование: /delete <id>")
-        return
-
-    feedback_id = context.args[0].strip()
-    try:
-        res = supabase.table("negative_constraints").delete().eq("id", feedback_id).execute()
-        if res.data:
-            await update.message.reply_text(f"🗑️ Анти-кейс удалён.")
+            expected = "Обучение"
         else:
-            await update.message.reply_text("Не найден анти-кейс с таким ID.")
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка удаления: {str(e)}")
+            prompt = (
+                "You are the editor of a Telegram channel about venture capital in Central Asia.\n"
+                "Write a short educational post in RUSSIAN about this VC topic:\n\n"
+                f"Topic: \"{topic}\"\n\n"
+                "Requirements:\n"
+                "- Length: 400-700 characters\n"
+                "- Start EXACTLY with: Обучение\n"
+                "- Explain simply for early-stage founders with concrete examples and numbers\n"
+                "- Add emojis for readability\n"
+                "- End with a discussion question\n"
+                "- No hashtags\n"
+            )
+            expected = "Обучение"
 
-# ────────────────────────────────────────────────
-# /stats
-# ────────────────────────────────────────────────
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+        post_text = gemini_generate(prompt)
+
+        if not post_text.startswith(expected):
+            post_text = f"{expected}\n\n{post_text}"
+
+        # Guarantee YouTube link is appended for Activat posts
+        if use_activat and youtube_url and youtube_url not in post_text:
+            post_text = f"{post_text}\n\n🎬 Смотреть урок: {youtube_url}"
+
+        print(f"Education post ready ({len(post_text)} chars)")
+
+    except Exception as e:
+        print(f"Gemini error: {e}")
+        await bot.send_message(TELEGRAM_ADMIN_ID, f"Gemini error (education): {str(e)}")
         return
 
-    try:
-        posted    = supabase.table("posted_news").select("count", count="exact").execute()
-        negatives = supabase.table("negative_constraints").select("count", count="exact").execute()
-        pending_r = supabase.table("pending_posts").select("count", count="exact").eq("status", "pending").execute()
-        approved  = supabase.table("pending_posts").select("count", count="exact").eq("status", "approved").execute()
-        rejected  = supabase.table("pending_posts").select("count", count="exact").eq("status", "rejected").execute()
+    candidate = {
+        "title":  topic,
+        "url":    youtube_url,
+        "region": "Education",
+        "key":    dedup_key,
+    }
 
-        mode = "ОДОБРЕНИЕ (первые 100)" if (posted.count or 0) < 100 else "АВТОМАТ"
+    source_tag = f"Activat VC: {youtube_url}" if use_activat else "Global VC topic"
 
-        text = (
-            f"📊 Статистика:\n\n"
-            f"Режим: {mode}\n"
-            f"Опубликовано постов: {posted.count}\n\n"
-            f"Посты на одобрении: {pending_r.count}\n"
-            f"Одобрено вручную: {approved.count}\n"
-            f"Отклонено: {rejected.count}\n\n"
-            f"Анти-кейсов (выученных): {negatives.count}"
+    if approval_mode:
+        pending_id = save_pending_post(candidate, post_text, None)
+        if not pending_id:
+            await bot.send_message(TELEGRAM_ADMIN_ID, "Failed to save education post.")
+            return
+        preview = (
+            f"EDUCATION POST FOR APPROVAL (#{posted_count + 1}/100)\n"
+            f"Source: {source_tag}\n"
+            f"--------------------\n"
+            f"{post_text}\n"
+            f"--------------------\n"
+            f"Approve: /approve {pending_id}\n"
+            f"Reject:  /reject {pending_id} reason here"
         )
-        await update.message.reply_text(text)
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка статистики: {str(e)}")
-
-# ────────────────────────────────────────────────
-# Plain text → add as anti-case manually
-# ────────────────────────────────────────────────
-async def add_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    feedback = update.message.text.strip()
-    if not feedback:
-        return
-
-    try:
-        res    = supabase.table("negative_constraints").insert({"feedback": feedback}).execute()
-        new_id = res.data[0]["id"]
-        await update.message.reply_text(
-            f"✅ Анти-кейс добавлен (ID: {new_id}):\n{feedback}"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка добавления: {str(e)}")
+        await bot.send_message(TELEGRAM_ADMIN_ID, preview)
+        print(f"Education sent for approval. ID: {pending_id}")
+    else:
+        await send_to_channel(post_text, None, EDUCATION_THREAD_ID)
+        add_to_posted(dedup_key, "EDUCATION", 8, "Education")
+        print("EDUCATION PUBLISHED!")
+        await bot.send_message(TELEGRAM_ADMIN_ID, f"Published education:\n{post_text[:200]}...")
 
 # ────────────────────────────────────────────────
 # MAIN
 # ────────────────────────────────────────────────
+async def main():
+    print(f"STARTING | {datetime.utcnow().isoformat()} UTC | TYPE: {POST_TYPE.upper()}")
+
+    negative_rules = fetch_negative_constraints()
+    print(f"Anti-cases loaded: {len(negative_rules)}")
+
+    posted_count  = get_posted_count()
+    approval_mode = posted_count < 100
+    print(f"Posts published: {posted_count} | Mode: {'APPROVAL' if approval_mode else 'AUTO'}")
+
+    if POST_TYPE == "education":
+        await run_education(posted_count, approval_mode)
+    else:
+        await run_news(posted_count, approval_mode, negative_rules)
+
+
 if __name__ == "__main__":
-    import logging
-    import asyncio
-
-    logging.basicConfig(level=logging.INFO)
-
-    # Python 3.14 requires explicit event loop creation
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    port        = int(os.getenv("PORT", 10000))
-    base_url    = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-    webhook_url = f"{base_url}/{TELEGRAM_FEEDBACK_BOT_TOKEN}"
-
-    print(f"🚀 ЗАПУСК FEEDBACK BOT (webhook mode)")
-    print(f"Webhook URL: {webhook_url}")
-    print(f"Port: {port}")
-
-    app = ApplicationBuilder().token(TELEGRAM_FEEDBACK_BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start",   start))
-    app.add_handler(CommandHandler("approve", approve))
-    app.add_handler(CommandHandler("reject",  reject))
-    app.add_handler(CommandHandler("pending", pending))
-    app.add_handler(CommandHandler("list",    list_feedbacks))
-    app.add_handler(CommandHandler("delete",  delete_feedback))
-    app.add_handler(CommandHandler("stats",   stats))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_feedback))
-
-    url_path = TELEGRAM_FEEDBACK_BOT_TOKEN  # must match the path in webhook_url
-
-    print("Bot is running in webhook mode.")
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=url_path,
-        key=None,
-        cert=None,
-        webhook_url=webhook_url,
-        drop_pending_updates=True,
-    )
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(f"Critical error: {e}")
+        if TELEGRAM_ADMIN_ID:
+            try:
+                asyncio.run(bot.send_message(TELEGRAM_ADMIN_ID, f"Main Bot crashed: {str(e)}"))
+            except:
+                pass
+        sys.exit(1)
