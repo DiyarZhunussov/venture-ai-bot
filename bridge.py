@@ -316,10 +316,7 @@ def tavily_search(query: str, max_results: int = 5) -> list:
                         continue  # skip articles older than 3 days
                 except Exception:
                     pass  # keep if date unparseable
-            else:
-                # No date = likely an evergreen page, not news — skip
-                print(f"No pub_date, skipping: {url}")
-                continue
+            # Allow articles without pub_date — Tavily often omits it for fresh content
 
             results.append({
                 "title":    r.get("title", ""),
@@ -611,10 +608,30 @@ async def run_education(posted_count: int, approval_mode: bool):
         dedup_key   = f"edu_global_{topic[:60]}"
         print(f"Global topic #{idx}: {topic}")
 
-    if is_already_posted(dedup_key):
+    # Check dedup by key AND by youtube_url (catches re-runs after DB reset)
+    already = is_already_posted(dedup_key)
+    if not already and use_activat and youtube_url:
+        already = is_already_posted(youtube_url)
+    if already:
         print(f"Topic already used: {topic}")
-        await bot.send_message(TELEGRAM_ADMIN_ID, "Education: topic already used, skipping.")
-        return
+        # Try next lesson instead of giving up
+        if use_activat:
+            next_idx = (idx + 1) % len(ACTIVAT_LESSONS)
+            next_lesson = ACTIVAT_LESSONS[next_idx]
+            next_key = f"activat_{next_lesson['title'][:60]}"
+            next_yt = next_lesson["youtube_url"]
+            if not is_already_posted(next_key) and not is_already_posted(next_yt):
+                print(f"Switching to next lesson: {next_lesson['title']}")
+                lesson = next_lesson
+                topic = next_lesson["title"]
+                youtube_url = next_lesson["youtube_url"]
+                dedup_key = next_key
+            else:
+                await bot.send_message(TELEGRAM_ADMIN_ID, "Education: topic already used, skipping.")
+                return
+        else:
+            await bot.send_message(TELEGRAM_ADMIN_ID, "Education: topic already used, skipping.")
+            return
 
     # Use stored transcript from ACTIVAT_LESSONS
     lesson_transcript = lesson.get("transcript", "") if use_activat else ""
@@ -696,7 +713,9 @@ async def run_education(posted_count: int, approval_mode: bool):
         print(f"Education sent for approval. ID: {pending_id}")
     else:
         await send_to_channel(post_text, None, EDUCATION_THREAD_ID)
-        add_to_posted(dedup_key, "EDUCATION", 8, "Education")
+        add_to_posted(dedup_key, "EDUCATION", 8, "Education", title=topic)
+        if use_activat and youtube_url:
+            add_to_posted(youtube_url, "EDUCATION", 8, "Education", title=topic)  # second key for URL dedup
         print("EDUCATION PUBLISHED!")
         await bot.send_message(TELEGRAM_ADMIN_ID, f"Published education:\n{post_text[:200]}...")
 
