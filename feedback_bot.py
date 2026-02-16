@@ -36,16 +36,26 @@ main_bot         = Bot(token=TELEGRAM_BOT_TOKEN)  # used to publish to channel
 # ────────────────────────────────────────────────
 # HELPERS
 # ────────────────────────────────────────────────
-def add_to_posted(url_or_text: str, news_type: str, score: int, source_type: str):
+def add_to_posted(url_or_text: str, news_type: str, score: int, source_type: str, title: str = ""):
     try:
         supabase.table("posted_news").insert({
             "url_text":           url_or_text,
             "news_type":          news_type,
             "shareability_score": score,
             "source_type":        source_type,
+            "title":              title,
         }).execute()
     except Exception as e:
-        print(f"Failed to save to posted_news: {e}")
+        # Retry without title in case column doesn't exist yet
+        try:
+            supabase.table("posted_news").insert({
+                "url_text":           url_or_text,
+                "news_type":          news_type,
+                "shareability_score": score,
+                "source_type":        source_type,
+            }).execute()
+        except Exception as e2:
+            print(f"Failed to save to posted_news: {e2}")
 
 def add_negative_constraint(feedback: str):
     try:
@@ -148,7 +158,9 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         supabase.table("pending_posts").update({"status": "approved"}).eq("id", pending_id).execute()
 
         # Record in posted_news (for dedup + count)
-        add_to_posted(url_key, "НОВОСТЬ", 8, region)
+        news_type  = "EDUCATION" if region == "Education" else "NEWS"
+        post_title = post.get("title", "")
+        add_to_posted(url_key, news_type, 8, region, title=post_title)
 
         await update.message.reply_text(f"✅ Пост опубликован!\n\n{post_text[:200]}...")
 
