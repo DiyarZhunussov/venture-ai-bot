@@ -293,10 +293,22 @@ def tavily_search(query: str, max_results: int = 5) -> list:
         results = []
         cutoff = datetime.utcnow().timestamp() - 86400 * 3  # 3 days ago
         from dateutil import parser as dateparser
-        # Domains that are aggregators/databases (not news) — always stale
+        # Domains that are aggregators/databases/wikis — no reliable pub date
         BLOCKED_DOMAINS = [
+            # Aggregators & databases
             "tracxn.com", "crunchbase.com", "pitchbook.com",
             "statista.com", "similarweb.com", "dealroom.co",
+            "dealroom.net", "topstartups.io", "openvc.app",
+            "vcsheet.com", "failory.com", "fundraiseinsider.com",
+            # Wiki-style sites (URLs have no date)
+            "tadviser.ru", "wikipedia.org", "wikia.com",
+            # Social media (no article date)
+            "instagram.com", "facebook.com", "linkedin.com",
+            "twitter.com", "t.me", "youtube.com",
+            # Event/landing pages
+            "ventureforum.asia", "startupbase.uz", "startupcup.asia",
+            # Investor directories
+            "shizune.co", "alleywatch.com",
         ]
 
         for r in response.get("results", []):
@@ -319,12 +331,17 @@ def tavily_search(query: str, max_results: int = 5) -> list:
                     pub_date = f"{y}-{m}-{d}"
                     print(f"Date from URL ({pub_date}): {url}")
                 else:
-                    # Try year+month only: /2026/01/ → assume it's from that month
+                    # Try year+month only: /2026/01/ → use start of month (conservative)
                     url_ym_match = re.search(r'/(20\d{2})/(\d{2})/', url)
                     if url_ym_match:
                         y, m = url_ym_match.groups()
-                        pub_date = f"{y}-{m}-01"  # assume start of month (conservative)
+                        pub_date = f"{y}-{m}-01"
                         print(f"Date from URL month ({pub_date}): {url}")
+
+            # If still no date found anywhere — skip (we can't verify freshness)
+            if not pub_date:
+                print(f"No date found, skipping: {url}")
+                continue
 
             if pub_date:
                 try:
