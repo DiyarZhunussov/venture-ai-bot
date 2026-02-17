@@ -60,19 +60,19 @@ def gemini_generate(prompt: str) -> str:
 # ────────────────────────────────────────────────
 SEARCH_QUERIES = [
     # Kazakhstan (highest priority)
-    {"query": "стартапы венчурные инвестиции Казахстан 2026",        "region": "Kazakhstan",  "priority": 0},
-    {"query": "Kazakhstan startup venture capital funding 2026",      "region": "Kazakhstan",  "priority": 0},
-    {"query": "Казахстан венчурный фонд раунд стартап",              "region": "Kazakhstan",  "priority": 0},
+    {"query": "Казахстан стартап инвестиции раунд февраль 2026",         "region": "Kazakhstan",  "priority": 0},
+    {"query": "Kazakhstan startup funding round raised February 2026",    "region": "Kazakhstan",  "priority": 0},
+    {"query": "Kazakhstan venture capital deal announcement 2026",        "region": "Kazakhstan",  "priority": 0},
 
     # Central Asia
-    {"query": "стартапы венчурные инвестиции Центральная Азия 2026", "region": "CentralAsia", "priority": 1},
-    {"query": "Central Asia startup investment funding 2026",         "region": "CentralAsia", "priority": 1},
-    {"query": "Узбекистан Кыргызстан стартап венчур инвестиции",     "region": "CentralAsia", "priority": 1},
+    {"query": "Узбекистан Кыргызстан стартап инвестиции раунд 2026",     "region": "CentralAsia", "priority": 1},
+    {"query": "Central Asia startup investment round raised 2026",        "region": "CentralAsia", "priority": 1},
+    {"query": "Центральная Азия венчур фонд сделка февраль 2026",        "region": "CentralAsia", "priority": 1},
 
-    # World — Tier-1 VC/tech only
-    {"query": "OpenAI Anthropic NVIDIA Google major AI funding 2026", "region": "World",       "priority": 2},
-    {"query": "top venture capital deal Series A B C funding 2026",   "region": "World",       "priority": 2},
-    {"query": "startup unicorn IPO major investment news 2026",       "region": "World",       "priority": 2},
+    # World — major VC deals only
+    {"query": "startup raised million Series A B funding February 2026",  "region": "World",       "priority": 2},
+    {"query": "venture capital deal announced this week February 2026",   "region": "World",       "priority": 2},
+    {"query": "AI startup funding round announced February 2026",         "region": "World",       "priority": 2},
 ]
 
 REGION_HEADER = {
@@ -563,14 +563,14 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
             f"IMPORTANT: Start the post EXACTLY with: {region_header}\n"
             "Then a blank line, then the post.\n\n"
             "Post structure:\n"
-            "1. One sentence — what happened (who, what, how much/many)\n"
-            "2. 2-3 key facts or numbers directly from the article\n"
-            "3. One sentence — why this matters for Central Asian startups or investors\n\n"
+            "1. Bold headline — one sentence: what happened (who, what, how much)\n"
+            "2. 2-3 bullet points with specific facts or numbers from the article\n"
+            "3. One concluding sentence — a concrete insight or implication (NOT a generic phrase like 'this is important for startups')\n\n"
             "Rules:\n"
             "- 400-700 characters total\n"
-            "- Use ONLY facts from the article above, do NOT invent anything\n"
-            "- Add emojis for readability\n"
-            "- NO questions at the end\n"
+            "- Use ONLY facts from the article, do NOT invent\n"
+            "- Emojis for readability\n"
+            "- NO questions, NO generic conclusions like 'this shows trends' or 'this is important for CA startups'\n"
             "- No hashtags\n"
         )
         post_text = gemini_generate(prompt)
