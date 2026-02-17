@@ -308,6 +308,24 @@ def tavily_search(query: str, max_results: int = 5) -> list:
                 continue
 
             pub_date = r.get("published_date")
+
+            # If Tavily didn't provide a date, try to extract it from the URL
+            if not pub_date:
+                import re
+                # Try full date: /2026/01/30/ or /2026-01-30
+                url_date_match = re.search(r'/(20\d{2})[/-](\d{2})[/-](\d{2})', url)
+                if url_date_match:
+                    y, m, d = url_date_match.groups()
+                    pub_date = f"{y}-{m}-{d}"
+                    print(f"Date from URL ({pub_date}): {url}")
+                else:
+                    # Try year+month only: /2026/01/ → assume it's from that month
+                    url_ym_match = re.search(r'/(20\d{2})/(\d{2})/', url)
+                    if url_ym_match:
+                        y, m = url_ym_match.groups()
+                        pub_date = f"{y}-{m}-01"  # assume start of month (conservative)
+                        print(f"Date from URL month ({pub_date}): {url}")
+
             if pub_date:
                 try:
                     pub_ts = dateparser.parse(pub_date).timestamp()
@@ -316,7 +334,9 @@ def tavily_search(query: str, max_results: int = 5) -> list:
                         continue  # skip articles older than 3 days
                 except Exception:
                     pass  # keep if date unparseable
-            # Allow articles without pub_date — Tavily often omits it for fresh content
+            else:
+                # No date anywhere — allow but flag
+                print(f"No date found, allowing: {url}")
 
             results.append({
                 "title":    r.get("title", ""),
