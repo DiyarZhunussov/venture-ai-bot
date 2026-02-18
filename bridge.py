@@ -581,8 +581,10 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
         # Always append source link
         post_text = f"{post_text}\n\n{best['url']}"
 
-        # Try og:image
+        # Try to get image: og:image → Unsplash fallback
         image_url = None
+        
+        # Method 1: Try og:image from article
         try:
             from bs4 import BeautifulSoup
             page = requests.get(best["url"], timeout=8)
@@ -590,8 +592,38 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
             img  = soup.find("meta", property="og:image")
             if img and img.get("content"):
                 image_url = img["content"]
-        except:
-            pass
+                print(f"Image from og:image: {image_url[:50]}...")
+        except Exception as e:
+            print(f"og:image failed: {e}")
+        
+        # Method 2: Fallback to Unsplash if no image found
+        if not image_url and UNSPLASH_ACCESS_KEY:
+            try:
+                # Generate relevant search query from article title
+                keywords = best["title"].lower()
+                # Extract VC-related terms
+                search_terms = []
+                if any(w in keywords for w in ["startup", "стартап"]):
+                    search_terms.append("startup office")
+                if any(w in keywords for w in ["funding", "investment", "инвестиц", "раунд"]):
+                    search_terms.append("business meeting")
+                if any(w in keywords for w in ["ai", "artificial intelligence", "ии"]):
+                    search_terms.append("technology")
+                if any(w in keywords for w in ["unicorn", "единорог"]):
+                    search_terms.append("success growth")
+                
+                query = search_terms[0] if search_terms else "venture capital"
+                
+                unsplash_url = f"https://api.unsplash.com/photos/random?query={query}&orientation=landscape"
+                headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
+                resp = requests.get(unsplash_url, headers=headers, timeout=5)
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    image_url = data["urls"]["regular"]
+                    print(f"Image from Unsplash ({query}): {image_url[:50]}...")
+            except Exception as e:
+                print(f"Unsplash fallback failed: {e}")
 
         print(f"Post ready ({len(post_text)} chars)")
 
