@@ -16,6 +16,7 @@ GROQ_API_KEY        = os.getenv("GROQ_API_KEY")
 TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_ADMIN_ID   = os.getenv("TELEGRAM_ADMIN_ID")
+TELEGRAM_FOUNDER_ID = os.getenv("TELEGRAM_FOUNDER_ID")   # NEW: Activat founder gets copies
 SUPABASE_URL        = os.getenv("SUPABASE_URL")
 SUPABASE_KEY        = os.getenv("SUPABASE_KEY")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
@@ -46,7 +47,7 @@ tavily   = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 # ────────────────────────────────────────────────
 
 def gemini_generate(prompt: str) -> str:
-    """Call Groq API with llama-3.3-70b. Drop-in replacement for Gemini."""
+    """Call Groq API with llama-3.3-70b."""
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
@@ -54,6 +55,18 @@ def gemini_generate(prompt: str) -> str:
         temperature=0.7,
     )
     return response.choices[0].message.content.strip()
+
+# ────────────────────────────────────────────────
+# NOTIFY RECIPIENTS (admin + founder if set)
+# ────────────────────────────────────────────────
+async def notify_recipients(message: str):
+    """Send message to admin. Also send to founder if TELEGRAM_FOUNDER_ID is set."""
+    await bot.send_message(TELEGRAM_ADMIN_ID, message)
+    if TELEGRAM_FOUNDER_ID and TELEGRAM_FOUNDER_ID != TELEGRAM_ADMIN_ID:
+        try:
+            await bot.send_message(TELEGRAM_FOUNDER_ID, message)
+        except Exception as e:
+            print(f"Failed to notify founder: {e}")
 
 # ────────────────────────────────────────────────
 # SEARCH QUERIES BY REGION
@@ -76,9 +89,9 @@ SEARCH_QUERIES = [
 ]
 
 REGION_HEADER = {
-    "Kazakhstan":  "Kazakhstan",
-    "CentralAsia": "Central Asia",
-    "World":       "World",
+    "Kazakhstan":  "Казахстан",
+    "CentralAsia": "Центральная Азия",
+    "World":       "Мир",
 }
 
 # ────────────────────────────────────────────────
@@ -193,7 +206,6 @@ def add_to_posted(key: str, news_type: str, score: int, source_type: str, title:
             "title":              title,
         }).execute()
     except Exception as e:
-        # Retry without title field in case column doesn't exist yet
         try:
             supabase.table("posted_news").insert({
                 "url_text":           key,
@@ -244,8 +256,6 @@ def get_recent_post_titles(limit: int = 30) -> list:
     """Get titles of recently posted/pending news for semantic duplicate detection."""
     titles = []
     try:
-        # From posted_news — get title + url_text
-        # Include both English and Russian news_type values
         res = supabase.table("posted_news") \
             .select("url_text, title, news_type") \
             .in_("news_type", ["NEWS", "НОВОСТЬ"]) \
@@ -253,7 +263,6 @@ def get_recent_post_titles(limit: int = 30) -> list:
             .limit(limit) \
             .execute()
         for row in res.data:
-            # Prefer title (human-readable), fall back to url_text
             if row.get("title"):
                 titles.append(row["title"])
             elif row.get("url_text"):
@@ -261,7 +270,6 @@ def get_recent_post_titles(limit: int = 30) -> list:
     except:
         pass
     try:
-        # Also check pending posts that haven't been approved yet
         res2 = supabase.table("pending_posts") \
             .select("title, url") \
             .eq("status", "pending") \
@@ -293,52 +301,41 @@ def tavily_search(query: str, max_results: int = 5) -> list:
         results = []
         cutoff = datetime.utcnow().timestamp() - 86400 * 3  # 3 days ago
         from dateutil import parser as dateparser
-        # Domains that are aggregators/databases/wikis — no reliable pub date
         BLOCKED_DOMAINS = [
-            # Aggregators & databases
             "tracxn.com", "crunchbase.com", "pitchbook.com",
             "statista.com", "similarweb.com", "dealroom.co",
             "dealroom.net", "topstartups.io", "openvc.app",
             "vcsheet.com", "failory.com", "fundraiseinsider.com",
-            # Wiki-style sites (URLs have no date)
             "tadviser.ru", "wikipedia.org", "wikia.com",
-            # Social media (no article date)
             "instagram.com", "facebook.com", "linkedin.com",
             "twitter.com", "t.me", "youtube.com",
-            # Event/landing pages
             "ventureforum.asia", "startupbase.uz", "startupcup.asia",
-            # Investor directories
             "shizune.co", "alleywatch.com",
         ]
 
         for r in response.get("results", []):
             url = r.get("url", "")
 
-            # Block known aggregator/database sites
             if any(domain in url for domain in BLOCKED_DOMAINS):
                 print(f"Blocked aggregator: {url}")
                 continue
 
             pub_date = r.get("published_date")
 
-            # If Tavily didn't provide a date, try to extract it from the URL
             if not pub_date:
                 import re
-                # Try full date: /2026/01/30/ or /2026-01-30
                 url_date_match = re.search(r'/(20\d{2})[/-](\d{2})[/-](\d{2})', url)
                 if url_date_match:
                     y, m, d = url_date_match.groups()
                     pub_date = f"{y}-{m}-{d}"
                     print(f"Date from URL ({pub_date}): {url}")
                 else:
-                    # Try year+month only: /2026/01/ → use start of month (conservative)
                     url_ym_match = re.search(r'/(20\d{2})/(\d{2})/', url)
                     if url_ym_match:
                         y, m = url_ym_match.groups()
                         pub_date = f"{y}-{m}-01"
                         print(f"Date from URL month ({pub_date}): {url}")
 
-            # If still no date found anywhere — skip (we can't verify freshness)
             if not pub_date:
                 print(f"No date found, skipping: {url}")
                 continue
@@ -348,11 +345,10 @@ def tavily_search(query: str, max_results: int = 5) -> list:
                     pub_ts = dateparser.parse(pub_date).timestamp()
                     if pub_ts < cutoff:
                         print(f"Too old ({pub_date}): {url}")
-                        continue  # skip articles older than 3 days
+                        continue
                 except Exception:
-                    pass  # keep if date unparseable
+                    pass
             else:
-                # No date anywhere — allow but flag
                 print(f"No date found, allowing: {url}")
 
             results.append({
@@ -465,7 +461,6 @@ async def send_to_channel(text: str, image_url: str, thread_id: str = None):
             )
     except TelegramError as te:
         print(f"Telegram error: {te}")
-        # Retry without image if image failed
         if image_url:
             try:
                 await bot.send_message(
@@ -475,7 +470,7 @@ async def send_to_channel(text: str, image_url: str, thread_id: str = None):
                 )
             except TelegramError as te2:
                 print(f"Retry also failed: {te2}")
-                await bot.send_message(TELEGRAM_ADMIN_ID, f"Send error: {str(te2)}")
+                await notify_recipients(f"Send error: {str(te2)}")
 
 # ────────────────────────────────────────────────
 # NEWS POST LOGIC (08:00)
@@ -515,17 +510,14 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
 
     if not all_candidates:
         print("No suitable news found.")
-        await bot.send_message(TELEGRAM_ADMIN_ID, "Main Bot: No suitable news found today.")
+        await notify_recipients("Main Bot: сегодня не нашлось подходящих новостей.")
         return
 
-    # Sort by region priority
     all_candidates.sort(key=lambda c: c["priority"])
 
-    # Load recent posts for semantic duplicate check
     recent_titles = get_recent_post_titles()
     print(f"Loaded {len(recent_titles)} recent post titles for duplicate check.")
 
-    # Try candidates until we find one that isn't a semantic duplicate
     best = None
     remaining = list(all_candidates)
 
@@ -538,40 +530,49 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
             best = candidate
             break
         else:
-            # Remove this duplicate and try next best
             remaining = [c for c in remaining if c["url"] != candidate["url"]]
             print(f"Skipping duplicate, {len(remaining)} candidates left.")
 
     if not best:
         print("All candidates are semantic duplicates of recent posts.")
-        await bot.send_message(
-            TELEGRAM_ADMIN_ID,
-            "Main Bot: All top candidates are duplicates of recent stories. No post today."
+        await notify_recipients(
+            "Main Bot: все найденные новости — дубли недавних публикаций. Пост сегодня не выйдет."
         )
         return
 
     print(f"Selected [{best['region']}]: {best['title']}")
     region_header = REGION_HEADER.get(best["region"], best["region"])
 
+    # Determine the country/region name for explicit mention in the post
+    # This helps the AI know what country to name explicitly (задание 4)
+    region_country_hint = {
+        "Kazakhstan":  "Казахстан",
+        "CentralAsia": "укажи конкретную страну (Казахстан, Узбекистан, Кыргызстан и т.д.) — не пиши просто 'президент' или 'правительство' без названия страны",
+        "World":       "укажи конкретную страну или компанию — не пиши просто 'президент' или 'правительство' без названия страны",
+    }.get(best["region"], "")
+
     try:
         prompt = (
-            "You are the editor of a Telegram channel about venture capital in Central Asia.\n"
-            "Write a news post in RUSSIAN based strictly on this article.\n\n"
-            f"Title: {best['title']}\n"
-            f"Content: {best['snippet']}\n"
-            f"URL: {best['url']}\n\n"
-            f"IMPORTANT: Start the post EXACTLY with: {region_header}\n"
-            "Then a blank line, then the post.\n\n"
-            "Post structure:\n"
-            "1. Bold headline — one sentence: what happened (who, what, how much)\n"
-            "2. 2-3 bullet points with specific facts or numbers from the article\n"
-            "3. One concluding sentence — a concrete insight or implication (NOT a generic phrase like 'this is important for startups')\n\n"
-            "Rules:\n"
-            "- 400-700 characters total\n"
-            "- Use ONLY facts from the article, do NOT invent\n"
-            "- Emojis for readability\n"
-            "- NO questions, NO generic conclusions like 'this shows trends' or 'this is important for CA startups'\n"
-            "- No hashtags\n"
+            "Ты редактор Telegram-канала о венчурном капитале в Центральной Азии.\n"
+            "Напиши новостной пост на РУССКОМ языке строго по этой статье.\n\n"
+            f"Заголовок статьи: {best['title']}\n"
+            f"Содержание: {best['snippet']}\n"
+            f"Ссылка: {best['url']}\n\n"
+            f"ВАЖНО про страну: {region_country_hint}. "
+            "Никогда не пиши просто 'президент', 'правительство', 'министр' — всегда добавляй страну. "
+            "Например: 'президент Узбекистана', 'правительство Казахстана'.\n\n"
+            f"Начни пост ТОЧНО со слова: {region_header}\n"
+            "Затем пустая строка, затем сам пост.\n\n"
+            "Структура поста — ровно 2 предложения:\n"
+            "1. Первое предложение: что произошло — кто, что, сколько (конкретные цифры и факты из статьи).\n"
+            "2. Второе предложение: конкретный вывод или последствие для рынка (не общие слова).\n\n"
+            "Правила:\n"
+            "- Пиши нейтральным деловым языком, без восторгов и пафоса\n"
+            "- Без эмодзи и смайликов\n"
+            "- Без хэштегов\n"
+            "- Только факты из статьи, ничего не придумывай\n"
+            "- Не заканчивай фразами вроде 'это важно для стартапов' или 'регион следит за трендами'\n"
+            "- Длина: 200-350 символов (два предложения)\n"
         )
         post_text = gemini_generate(prompt)
 
@@ -583,8 +584,7 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
 
         # Try to get image: og:image → Unsplash fallback
         image_url = None
-        
-        # Method 1: Try og:image from article
+
         try:
             from bs4 import BeautifulSoup
             page = requests.get(best["url"], timeout=8)
@@ -595,13 +595,10 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
                 print(f"Image from og:image: {image_url[:50]}...")
         except Exception as e:
             print(f"og:image failed: {e}")
-        
-        # Method 2: Fallback to Unsplash if no image found
+
         if not image_url and UNSPLASH_ACCESS_KEY:
             try:
-                # Generate relevant search query from article title
                 keywords = best["title"].lower()
-                # Extract VC-related terms
                 search_terms = []
                 if any(w in keywords for w in ["startup", "стартап"]):
                     search_terms.append("startup office")
@@ -611,13 +608,13 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
                     search_terms.append("technology")
                 if any(w in keywords for w in ["unicorn", "единорог"]):
                     search_terms.append("success growth")
-                
+
                 query = search_terms[0] if search_terms else "venture capital"
-                
+
                 unsplash_url = f"https://api.unsplash.com/photos/random?query={query}&orientation=landscape"
                 headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
                 resp = requests.get(unsplash_url, headers=headers, timeout=5)
-                
+
                 if resp.status_code == 200:
                     data = resp.json()
                     image_url = data["urls"]["regular"]
@@ -629,29 +626,29 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
 
     except Exception as e:
         print(f"Gemini error: {e}")
-        await bot.send_message(TELEGRAM_ADMIN_ID, f"Gemini error: {str(e)}")
+        await notify_recipients(f"Groq error: {str(e)}")
         return
 
     if approval_mode:
         pending_id = save_pending_post(best, post_text, image_url)
         if not pending_id:
-            await bot.send_message(TELEGRAM_ADMIN_ID, "Failed to save post for approval.")
+            await notify_recipients("Не удалось сохранить пост для одобрения.")
             return
         preview = (
-            f"NEWS POST FOR APPROVAL (#{posted_count + 1}/100)\n"
+            f"НОВОСТЬ НА ОДОБРЕНИЕ (#{posted_count + 1}/100)\n"
             f"--------------------\n"
             f"{post_text}\n"
             f"--------------------\n"
-            f"Approve: /approve {pending_id}\n"
-            f"Reject:  /reject {pending_id} reason here"
+            f"Одобрить: /approve {pending_id}\n"
+            f"Отклонить: /reject {pending_id} причина"
         )
-        await bot.send_message(TELEGRAM_ADMIN_ID, preview)
+        await notify_recipients(preview)
         print(f"Sent for approval. ID: {pending_id}")
     else:
         await send_to_channel(post_text, image_url, NEWS_THREAD_ID)
         add_to_posted(best["key"], "NEWS", 8, best["region"], title=best.get("title", ""))
         print("PUBLISHED!")
-        await bot.send_message(TELEGRAM_ADMIN_ID, f"Published news:\n{post_text[:200]}...")
+        await notify_recipients(f"Новость опубликована:\n{post_text[:200]}...")
 
 # ────────────────────────────────────────────────
 # EDUCATION POST LOGIC (17:00)
@@ -661,7 +658,7 @@ async def run_education(posted_count: int, approval_mode: bool):
     print("MODE: EDUCATION (17:00)")
 
     edu_count   = get_education_count()
-    use_activat = (edu_count % 2 == 0)  # Activat, Global, Activat, Global...
+    use_activat = (edu_count % 2 == 0)
 
     if use_activat:
         idx         = (edu_count // 2) % len(ACTIVAT_LESSONS)
@@ -677,13 +674,11 @@ async def run_education(posted_count: int, approval_mode: bool):
         dedup_key   = f"edu_global_{topic[:60]}"
         print(f"Global topic #{idx}: {topic}")
 
-    # Check dedup by key AND by youtube_url (catches re-runs after DB reset)
     already = is_already_posted(dedup_key)
     if not already and use_activat and youtube_url:
         already = is_already_posted(youtube_url)
     if already:
         print(f"Topic already used: {topic}")
-        # Try next lesson instead of giving up
         if use_activat:
             next_idx = (idx + 1) % len(ACTIVAT_LESSONS)
             next_lesson = ACTIVAT_LESSONS[next_idx]
@@ -696,13 +691,12 @@ async def run_education(posted_count: int, approval_mode: bool):
                 youtube_url = next_lesson["youtube_url"]
                 dedup_key = next_key
             else:
-                await bot.send_message(TELEGRAM_ADMIN_ID, "Education: topic already used, skipping.")
+                await notify_recipients("Обучение: тема уже использована, пропускаю.")
                 return
         else:
-            await bot.send_message(TELEGRAM_ADMIN_ID, "Education: topic already used, skipping.")
+            await notify_recipients("Обучение: тема уже использована, пропускаю.")
             return
 
-    # Use stored transcript from ACTIVAT_LESSONS
     lesson_transcript = lesson.get("transcript", "") if use_activat else ""
     if use_activat:
         print(f"Using stored transcript: {len(lesson_transcript)} chars")
@@ -710,32 +704,32 @@ async def run_education(posted_count: int, approval_mode: bool):
     try:
         if use_activat:
             prompt = (
-                "You are the editor of a Telegram channel about venture capital in Central Asia.\n"
-                "Write a short educational post in RUSSIAN based ONLY on this lesson transcript.\n\n"
-                f"Topic: \"{topic}\"\n\n"
-                f"Transcript:\n{lesson_transcript}\n\n"
-                "Requirements:\n"
-                "- Use ONLY facts and examples from the transcript above, do not invent\n"
-                "- Length: 400-700 characters\n"
-                "- Start EXACTLY with: Обучение\n"
-                "- Explain simply with concrete examples from the transcript\n"
-                "- Add emojis for readability\n"
-                f"- End with this exact line: 🎬 Смотреть урок: {youtube_url}\n"
-                "- No hashtags\n"
+                "Ты редактор Telegram-канала о венчурном капитале в Центральной Азии.\n"
+                "Напиши короткий обучающий пост на РУССКОМ языке строго по этому конспекту урока.\n\n"
+                f"Тема: \"{topic}\"\n\n"
+                f"Конспект:\n{lesson_transcript}\n\n"
+                "Требования:\n"
+                "- Используй ТОЛЬКО факты и примеры из конспекта, ничего не придумывай\n"
+                "- Длина: 200-350 символов\n"
+                "- Начни ТОЧНО со слова: Обучение\n"
+                "- Объясняй просто, с конкретными примерами из конспекта\n"
+                "- Без эмодзи и смайликов\n"
+                "- Без хэштегов\n"
+                f"- Последняя строка: Смотреть урок: {youtube_url}\n"
             )
             expected = "Обучение"
         else:
             prompt = (
-                "You are the editor of a Telegram channel about venture capital in Central Asia.\n"
-                "Write a short educational post in RUSSIAN about this VC topic:\n\n"
-                f"Topic: \"{topic}\"\n\n"
-                "Requirements:\n"
-                "- Length: 400-700 characters\n"
-                "- Start EXACTLY with: Обучение\n"
-                "- Explain simply for early-stage founders with concrete examples and numbers\n"
-                "- Add emojis for readability\n"
-                "- End with a discussion question\n"
-                "- No hashtags\n"
+                "Ты редактор Telegram-канала о венчурном капитале в Центральной Азии.\n"
+                "Напиши короткий обучающий пост на РУССКОМ языке по этой теме:\n\n"
+                f"Тема: \"{topic}\"\n\n"
+                "Требования:\n"
+                "- Длина: 200-350 символов\n"
+                "- Начни ТОЧНО со слова: Обучение\n"
+                "- Объясняй просто для начинающих фаундеров, с конкретными примерами и цифрами\n"
+                "- Без эмодзи и смайликов\n"
+                "- Без хэштегов\n"
+                "- Заверши конкретным вопросом для обсуждения\n"
             )
             expected = "Обучение"
 
@@ -744,15 +738,14 @@ async def run_education(posted_count: int, approval_mode: bool):
         if not post_text.startswith(expected):
             post_text = f"{expected}\n\n{post_text}"
 
-        # Guarantee YouTube link is appended for Activat posts
         if use_activat and youtube_url and youtube_url not in post_text:
-            post_text = f"{post_text}\n\n🎬 Смотреть урок: {youtube_url}"
+            post_text = f"{post_text}\n\nСмотреть урок: {youtube_url}"
 
         print(f"Education post ready ({len(post_text)} chars)")
 
     except Exception as e:
         print(f"Gemini error: {e}")
-        await bot.send_message(TELEGRAM_ADMIN_ID, f"Gemini error (education): {str(e)}")
+        await notify_recipients(f"Groq error (обучение): {str(e)}")
         return
 
     candidate = {
@@ -767,26 +760,26 @@ async def run_education(posted_count: int, approval_mode: bool):
     if approval_mode:
         pending_id = save_pending_post(candidate, post_text, None)
         if not pending_id:
-            await bot.send_message(TELEGRAM_ADMIN_ID, "Failed to save education post.")
+            await notify_recipients("Не удалось сохранить обучающий пост.")
             return
         preview = (
-            f"EDUCATION POST FOR APPROVAL (#{posted_count + 1}/100)\n"
-            f"Source: {source_tag}\n"
+            f"ОБУЧЕНИЕ НА ОДОБРЕНИЕ (#{posted_count + 1}/100)\n"
+            f"Источник: {source_tag}\n"
             f"--------------------\n"
             f"{post_text}\n"
             f"--------------------\n"
-            f"Approve: /approve {pending_id}\n"
-            f"Reject:  /reject {pending_id} reason here"
+            f"Одобрить: /approve {pending_id}\n"
+            f"Отклонить: /reject {pending_id} причина"
         )
-        await bot.send_message(TELEGRAM_ADMIN_ID, preview)
+        await notify_recipients(preview)
         print(f"Education sent for approval. ID: {pending_id}")
     else:
         await send_to_channel(post_text, None, EDUCATION_THREAD_ID)
         add_to_posted(dedup_key, "EDUCATION", 8, "Education", title=topic)
         if use_activat and youtube_url:
-            add_to_posted(youtube_url, "EDUCATION", 8, "Education", title=topic)  # second key for URL dedup
+            add_to_posted(youtube_url, "EDUCATION", 8, "Education", title=topic)
         print("EDUCATION PUBLISHED!")
-        await bot.send_message(TELEGRAM_ADMIN_ID, f"Published education:\n{post_text[:200]}...")
+        await notify_recipients(f"Обучение опубликовано:\n{post_text[:200]}...")
 
 # ────────────────────────────────────────────────
 # MAIN
