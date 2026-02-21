@@ -11,7 +11,7 @@ An intelligent Telegram bot that automatically curates and posts venture capital
 - **Human-in-the-loop**: Approval workflow for quality control (auto-publishes after 100 approved posts)
 - **Learning System**: Remembers rejection reasons to avoid similar content in future
 - **Multi-region Focus**: Prioritizes Kazakhstan → Central Asia → World news
-
+- **Image Generation:** Generates images when websites don't have images for parsing, uses Unsplash.com
 ## Architecture
 
 ```
@@ -316,7 +316,6 @@ Contributions welcome! Areas for improvement:
 
 - [ ] Add more news sources
 - [ ] Support multiple languages
-- [ ] Image generation for posts
 - [ ] Sentiment analysis
 - [ ] Competitor tracking
 - [ ] Weekly digest feature
