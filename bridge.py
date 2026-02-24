@@ -2,7 +2,7 @@ import os
 import sys
 import asyncio
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from supabase import create_client, Client
 from groq import Groq
 from telegram import Bot
@@ -16,14 +16,13 @@ GROQ_API_KEY        = os.getenv("GROQ_API_KEY")
 TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_ADMIN_ID   = os.getenv("TELEGRAM_ADMIN_ID")
-TELEGRAM_FOUNDER_ID = os.getenv("TELEGRAM_FOUNDER_ID")   # NEW: Activat founder gets copies
+TELEGRAM_FOUNDER_ID = os.getenv("TELEGRAM_FOUNDER_ID")
 SUPABASE_URL        = os.getenv("SUPABASE_URL")
 SUPABASE_KEY        = os.getenv("SUPABASE_KEY")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
 TAVILY_API_KEY      = os.getenv("TAVILY_API_KEY")
 POST_TYPE           = os.getenv("POST_TYPE", "news")
 
-# Supergroup topic thread IDs (optional)
 NEWS_THREAD_ID      = os.getenv("TELEGRAM_NEWS_THREAD_ID")
 EDUCATION_THREAD_ID = os.getenv("TELEGRAM_EDUCATION_THREAD_ID")
 
@@ -45,9 +44,7 @@ tavily   = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 # ────────────────────────────────────────────────
 # GROQ LLM WRAPPER
 # ────────────────────────────────────────────────
-
 def gemini_generate(prompt: str) -> str:
-    """Call Groq API with llama-3.3-70b."""
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
@@ -60,7 +57,6 @@ def gemini_generate(prompt: str) -> str:
 # NOTIFY RECIPIENTS (admin + founder if set)
 # ────────────────────────────────────────────────
 async def notify_recipients(message: str):
-    """Send message to admin. Also send to founder if TELEGRAM_FOUNDER_ID is set."""
     await bot.send_message(TELEGRAM_ADMIN_ID, message)
     if TELEGRAM_FOUNDER_ID and TELEGRAM_FOUNDER_ID != TELEGRAM_ADMIN_ID:
         try:
@@ -72,17 +68,12 @@ async def notify_recipients(message: str):
 # SEARCH QUERIES BY REGION
 # ────────────────────────────────────────────────
 SEARCH_QUERIES = [
-    # Kazakhstan (highest priority)
     {"query": "Казахстан стартап инвестиции раунд февраль 2026",         "region": "Kazakhstan",  "priority": 0},
     {"query": "Kazakhstan startup funding round raised February 2026",    "region": "Kazakhstan",  "priority": 0},
     {"query": "Kazakhstan venture capital deal announcement 2026",        "region": "Kazakhstan",  "priority": 0},
-
-    # Central Asia
     {"query": "Узбекистан Кыргызстан стартап инвестиции раунд 2026",     "region": "CentralAsia", "priority": 1},
     {"query": "Central Asia startup investment round raised 2026",        "region": "CentralAsia", "priority": 1},
     {"query": "Центральная Азия венчур фонд сделка февраль 2026",        "region": "CentralAsia", "priority": 1},
-
-    # World — major VC deals only
     {"query": "startup raised million Series A B funding February 2026",  "region": "World",       "priority": 2},
     {"query": "venture capital deal announced this week February 2026",   "region": "World",       "priority": 2},
     {"query": "AI startup funding round announced February 2026",         "region": "World",       "priority": 2},
@@ -196,6 +187,41 @@ def is_already_posted(key: str) -> bool:
         print(f"Supabase check error: {e}")
         return False
 
+def is_already_pending(url: str) -> bool:
+    """
+    FIX #1: Check if this URL is already sitting in pending_posts awaiting approval.
+    Without this check, the bot generates the same article every day if nobody approves it.
+    """
+    if not url:
+        return False
+    try:
+        res = supabase.table("pending_posts").select("id").eq("url", url).eq("status", "pending").execute()
+        return len(res.data) > 0
+    except Exception as e:
+        print(f"Supabase pending check error: {e}")
+        return False
+
+def expire_old_pending_posts():
+    """
+    FIX #2: Mark pending posts older than 2 days as 'expired'.
+    This cleans up the queue and prevents stale posts from blocking new ones.
+    """
+    try:
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        res = supabase.table("pending_posts") \
+            .update({"status": "expired"}) \
+            .eq("status", "pending") \
+            .lt("created_at", cutoff) \
+            .execute()
+        count = len(res.data) if res.data else 0
+        if count > 0:
+            print(f"Expired {count} old pending posts (older than 2 days).")
+        return count
+    except Exception as e:
+        print(f"Failed to expire old pending posts: {e}")
+        return 0
+
 def add_to_posted(key: str, news_type: str, score: int, source_type: str, title: str = ""):
     try:
         supabase.table("posted_news").insert({
@@ -246,14 +272,26 @@ def save_pending_post(candidate: dict, post_text: str, image_url) -> str:
         return None
 
 def fetch_negative_constraints() -> list:
+    """
+    FIX #3: Logs all loaded constraints so you can see them in GitHub Actions logs.
+    This makes the 'learning' visible and debuggable.
+    """
     try:
-        res = supabase.table("negative_constraints").select("feedback").execute()
-        return [row["feedback"].lower() for row in res.data]
-    except:
+        res = supabase.table("negative_constraints").select("feedback, created_at").execute()
+        constraints = [row["feedback"].lower() for row in res.data]
+        if constraints:
+            print(f"=== NEGATIVE CONSTRAINTS LOADED ({len(constraints)}) ===")
+            for i, c in enumerate(constraints):
+                print(f"  [{i+1}] {c}")
+            print("=" * 40)
+        else:
+            print("No negative constraints in database — no rejections have been saved yet.")
+        return constraints
+    except Exception as e:
+        print(f"Error loading negative constraints: {e}")
         return []
 
 def get_recent_post_titles(limit: int = 30) -> list:
-    """Get titles of recently posted/pending news for semantic duplicate detection."""
     titles = []
     try:
         res = supabase.table("posted_news") \
@@ -274,7 +312,7 @@ def get_recent_post_titles(limit: int = 30) -> list:
             .select("title, url") \
             .eq("status", "pending") \
             .order("created_at", desc=True) \
-            .limit(10) \
+            .limit(20) \
             .execute()
         for row in res2.data:
             if row.get("title"):
@@ -284,6 +322,33 @@ def get_recent_post_titles(limit: int = 30) -> list:
     except:
         pass
     return titles
+
+def get_rejected_post_summaries(limit: int = 20) -> list:
+    """
+    FIX #4: Load titles of rejected posts so the AI explicitly avoids covering same topics again.
+    Previously rejected posts had no effect on future article selection.
+    """
+    summaries = []
+    try:
+        res = supabase.table("pending_posts") \
+            .select("title, url, region") \
+            .eq("status", "rejected") \
+            .order("created_at", desc=True) \
+            .limit(limit) \
+            .execute()
+        for row in res.data:
+            if row.get("title"):
+                summaries.append(row["title"])
+            if row.get("url"):
+                summaries.append(row["url"])
+        if summaries:
+            print(f"=== REJECTED POSTS LOADED ({len(summaries)}) — will avoid similar content ===")
+            for s in summaries[:10]:
+                print(f"  - {s[:80]}")
+            print("=" * 40)
+    except Exception as e:
+        print(f"Error loading rejected posts: {e}")
+    return summaries
 
 # ────────────────────────────────────────────────
 # TAVILY SEARCH
@@ -299,7 +364,7 @@ def tavily_search(query: str, max_results: int = 5) -> list:
             days=3,
         )
         results = []
-        cutoff = datetime.utcnow().timestamp() - 86400 * 3  # 3 days ago
+        cutoff = datetime.utcnow().timestamp() - 86400 * 3
         from dateutil import parser as dateparser
         BLOCKED_DOMAINS = [
             "tracxn.com", "crunchbase.com", "pitchbook.com",
@@ -348,8 +413,6 @@ def tavily_search(query: str, max_results: int = 5) -> list:
                         continue
                 except Exception:
                     pass
-            else:
-                print(f"No date found, allowing: {url}")
 
             results.append({
                 "title":    r.get("title", ""),
@@ -364,26 +427,50 @@ def tavily_search(query: str, max_results: int = 5) -> list:
 
 # ────────────────────────────────────────────────
 # VC RELEVANCE KEYWORD FILTER
+# FIX #5: Stricter keywords + hard excludes for geopolitics/crypto/etc
 # ────────────────────────────────────────────────
 VC_KEYWORDS = [
-    "стартап", "венчур", "инвестиц", "раунд", "фонд",
-    "startup", "venture", "funding", "investment", "investor",
-    "series a", "series b", "series c", "seed", "pre-seed",
+    "стартап", "венчурный фонд", "инвестиции в стартап", "раунд финансирования",
+    "startup", "venture capital", "funding round", "raised $", "raises $",
+    "series a", "series b", "series c", "seed round", "pre-seed",
     "ipo", "unicorn", "единорог", "акселератор", "accelerator",
     "openai", "anthropic", "nvidia", "sequoia", "a16z", "y combinator",
-    "techcrunch", "fintech", "edtech", "healthtech", "saas", "pitch",
+    "fintech startup", "edtech", "healthtech", "saas funding",
+    "venture fund", "vc fund", "angel investment", "angel investor",
+]
+
+HARD_EXCLUDE_KEYWORDS = [
+    "геополитик", "военн", "foreign policy", "military", "sanctions", "geopolitic",
+    "криптовалют", "bitcoin", "ethereum", "nft", " crypto ",
+    "real estate fund", "mortgage", "ипотек",
+    "что стоит за", "активность сша", "активность китая",
 ]
 
 def is_vc_relevant(title: str, snippet: str, negative_rules: list) -> bool:
     content = (title + " " + snippet).lower()
-    if any(rule in content for rule in negative_rules):
-        return False
-    return any(kw in content for kw in VC_KEYWORDS)
+
+    for kw in HARD_EXCLUDE_KEYWORDS:
+        if kw in content:
+            print(f"Hard excluded ({kw}): {title[:60]}")
+            return False
+
+    for rule in negative_rules:
+        if rule in content:
+            print(f"Negative constraint matched ({rule!r}): {title[:60]}")
+            return False
+
+    matched = [kw for kw in VC_KEYWORDS if kw in content]
+    if matched:
+        return True
+
+    print(f"No VC keywords matched: {title[:60]}")
+    return False
 
 # ────────────────────────────────────────────────
 # GEMINI: PICK BEST ARTICLE
+# FIX #6: Now passes negative constraints + rejected titles to the AI for better selection
 # ────────────────────────────────────────────────
-async def pick_best_with_gemini(candidates: list) -> dict:
+async def pick_best_with_gemini(candidates: list, negative_constraints: list, rejected_titles: list) -> dict:
     if not candidates:
         return None
     if len(candidates) == 1:
@@ -393,13 +480,25 @@ async def pick_best_with_gemini(candidates: list) -> dict:
     for i, c in enumerate(candidates[:10]):
         articles_text += f"{i+1}. [{c['region']}] {c['title']}\n   {c['snippet']}\n\n"
 
+    avoid_context = ""
+    if negative_constraints:
+        avoid_context += "\nPreviously REJECTED for these reasons — avoid similar content:\n"
+        for nc in negative_constraints[:10]:
+            avoid_context += f"  - {nc}\n"
+    if rejected_titles:
+        avoid_context += "\nPreviously REJECTED post titles — do not cover same stories:\n"
+        for rt in rejected_titles[:10]:
+            avoid_context += f"  - {rt}\n"
+
     try:
         prompt = (
             "You are a venture capital news editor for a Central Asian VC Telegram channel.\n"
             "From this list, pick ONE article MOST relevant to startups and venture capital.\n"
-            "Must be about: startup funding, VC fund news, major tech AI strategy "
-            "(OpenAI/Anthropic/NVIDIA/Google), startup ecosystem, or venture market trends.\n"
-            "Do NOT pick: consumer finance, personal taxes, sports, politics, general business.\n\n"
+            "Must be about: startup funding rounds, VC fund news, major tech/AI company investments, "
+            "startup ecosystem news, or venture market trends.\n"
+            "Do NOT pick: consumer finance, personal taxes, sports, politics, geopolitics, "
+            "general government policy, cryptocurrency, real estate.\n"
+            f"{avoid_context}\n"
             f"{articles_text}"
             "Respond with ONLY the number (e.g.: 3). Nothing else."
         )
@@ -413,19 +512,20 @@ async def pick_best_with_gemini(candidates: list) -> dict:
 
 # ────────────────────────────────────────────────
 # GEMINI: SEMANTIC DUPLICATE CHECK
+# FIX #7: Also checks against rejected post titles, not just published ones
 # ────────────────────────────────────────────────
-async def is_semantic_duplicate(candidate: dict, recent_titles: list) -> bool:
-    """Check if this story was already covered recently (same story, different source)."""
-    if not recent_titles:
+async def is_semantic_duplicate(candidate: dict, recent_titles: list, rejected_titles: list) -> bool:
+    all_titles = recent_titles + rejected_titles
+    if not all_titles:
         return False
     try:
-        recent_text = "\n".join(str(t) for t in recent_titles[:20])
+        recent_text = "\n".join(str(t) for t in all_titles[:30])
         prompt = (
             f"New article title: {candidate['title']}\n"
             f"New article snippet: {candidate['snippet'][:200]}\n\n"
-            f"Recently published articles/URLs:\n{recent_text}\n\n"
-            "Is the new article covering the SAME news story as any of the recent ones? "
-            "Same story means same event, same data, same announcement — just from a different source.\n"
+            f"Recently published OR recently rejected articles/URLs:\n{recent_text}\n\n"
+            "Is the new article covering the SAME news story as any of the above? "
+            "Same story = same event, same announcement, same data — even from a different source.\n"
             "Answer only YES or NO."
         )
         answer = gemini_generate(prompt).upper()
@@ -438,7 +538,7 @@ async def is_semantic_duplicate(candidate: dict, recent_titles: list) -> bool:
         return False
 
 # ────────────────────────────────────────────────
-# TELEGRAM SEND (supports supergroup topics)
+# TELEGRAM SEND
 # ────────────────────────────────────────────────
 async def send_to_channel(text: str, image_url: str, thread_id: str = None):
     kwargs = {"chat_id": TELEGRAM_CHAT_ID}
@@ -463,17 +563,13 @@ async def send_to_channel(text: str, image_url: str, thread_id: str = None):
         print(f"Telegram error: {te}")
         if image_url:
             try:
-                await bot.send_message(
-                    text=text,
-                    disable_web_page_preview=False,
-                    **kwargs
-                )
+                await bot.send_message(text=text, disable_web_page_preview=False, **kwargs)
             except TelegramError as te2:
                 print(f"Retry also failed: {te2}")
                 await notify_recipients(f"Send error: {str(te2)}")
 
 # ────────────────────────────────────────────────
-# NEWS POST LOGIC (08:00)
+# NEWS POST LOGIC
 # ────────────────────────────────────────────────
 async def run_news(posted_count: int, approval_mode: bool, negative_rules: list):
     print("MODE: NEWS (08:00)")
@@ -485,6 +581,10 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
         results = tavily_search(search["query"], max_results=10)
         for r in results:
             if is_already_posted(r["url"]):
+                print(f"Already in posted_news: {r['url'][:60]}")
+                continue
+            if is_already_pending(r["url"]):
+                print(f"Already pending approval: {r['url'][:60]}")
                 continue
             if not is_vc_relevant(r["title"], r["snippet"], negative_rules):
                 continue
@@ -497,7 +597,6 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
                 "key":      r["url"],
             })
 
-    # Deduplicate by URL
     seen = set()
     unique = []
     for c in all_candidates:
@@ -515,18 +614,18 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
 
     all_candidates.sort(key=lambda c: c["priority"])
 
-    recent_titles = get_recent_post_titles()
-    print(f"Loaded {len(recent_titles)} recent post titles for duplicate check.")
+    recent_titles   = get_recent_post_titles()
+    rejected_titles = get_rejected_post_summaries()
+    print(f"Loaded {len(recent_titles)} recent + {len(rejected_titles)} rejected titles for duplicate check.")
 
     best = None
     remaining = list(all_candidates)
 
     while remaining:
-        candidate = await pick_best_with_gemini(remaining)
+        candidate = await pick_best_with_gemini(remaining, negative_rules, rejected_titles)
         if not candidate:
             break
-
-        if not await is_semantic_duplicate(candidate, recent_titles):
+        if not await is_semantic_duplicate(candidate, recent_titles, rejected_titles):
             best = candidate
             break
         else:
@@ -535,21 +634,23 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
 
     if not best:
         print("All candidates are semantic duplicates of recent posts.")
-        await notify_recipients(
-            "Main Bot: все найденные новости — дубли недавних публикаций. Пост сегодня не выйдет."
-        )
+        await notify_recipients("Main Bot: все найденные новости — дубли недавних публикаций. Пост сегодня не выйдет.")
         return
 
     print(f"Selected [{best['region']}]: {best['title']}")
     region_header = REGION_HEADER.get(best["region"], best["region"])
 
-    # Determine the country/region name for explicit mention in the post
-    # This helps the AI know what country to name explicitly (задание 4)
     region_country_hint = {
         "Kazakhstan":  "Казахстан",
         "CentralAsia": "укажи конкретную страну (Казахстан, Узбекистан, Кыргызстан и т.д.) — не пиши просто 'президент' или 'правительство' без названия страны",
         "World":       "укажи конкретную страну или компанию — не пиши просто 'президент' или 'правительство' без названия страны",
     }.get(best["region"], "")
+
+    constraint_context = ""
+    if negative_rules:
+        constraint_context = "\nПредыдущие причины отклонений (не повторяй подобный контент):\n"
+        for rule in negative_rules[:8]:
+            constraint_context += f"  - {rule}\n"
 
     try:
         prompt = (
@@ -560,31 +661,28 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
             f"Ссылка: {best['url']}\n\n"
             f"ВАЖНО про страну: {region_country_hint}. "
             "Никогда не пиши просто 'президент', 'правительство', 'министр' — всегда добавляй страну. "
-            "Например: 'президент Узбекистана', 'правительство Казахстана'.\n\n"
+            "Например: 'президент Узбекистана', 'правительство Казахстана'.\n"
+            f"{constraint_context}\n"
             f"Начни пост ТОЧНО со слова: {region_header}\n"
             "Затем пустая строка, затем сам пост.\n\n"
             "Структура поста — ровно 2 предложения:\n"
-            "1. Первое предложение: что произошло — кто, что, сколько (конкретные цифры и факты из статьи).\n"
-            "2. Второе предложение: конкретный вывод или последствие для рынка (не общие слова).\n\n"
+            "1. Что произошло — кто, что, сколько (конкретные цифры и факты из статьи).\n"
+            "2. Конкретный вывод или последствие для рынка — без общих фраз.\n\n"
             "Правила:\n"
-            "- Пиши нейтральным деловым языком, без восторгов и пафоса\n"
+            "- Нейтральный деловой язык, без восторгов\n"
             "- Без эмодзи и смайликов\n"
             "- Без хэштегов\n"
-            "- Только факты из статьи, ничего не придумывай\n"
-            "- Не заканчивай фразами вроде 'это важно для стартапов' или 'регион следит за трендами'\n"
-            "- Длина: 200-350 символов (два предложения)\n"
+            "- Только факты из статьи\n"
+            "- Длина: 200-350 символов\n"
         )
         post_text = gemini_generate(prompt)
 
         if not post_text.startswith(region_header):
             post_text = f"{region_header}\n\n{post_text}"
 
-        # Always append source link
         post_text = f"{post_text}\n\n{best['url']}"
 
-        # Try to get image: og:image → Unsplash fallback
         image_url = None
-
         try:
             from bs4 import BeautifulSoup
             page = requests.get(best["url"], timeout=8)
@@ -606,18 +704,14 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
                     search_terms.append("business meeting")
                 if any(w in keywords for w in ["ai", "artificial intelligence", "ии"]):
                     search_terms.append("technology")
-                if any(w in keywords for w in ["unicorn", "единорог"]):
-                    search_terms.append("success growth")
-
                 query = search_terms[0] if search_terms else "venture capital"
-
-                unsplash_url = f"https://api.unsplash.com/photos/random?query={query}&orientation=landscape"
-                headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
-                resp = requests.get(unsplash_url, headers=headers, timeout=5)
-
+                resp = requests.get(
+                    f"https://api.unsplash.com/photos/random?query={query}&orientation=landscape",
+                    headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+                    timeout=5
+                )
                 if resp.status_code == 200:
-                    data = resp.json()
-                    image_url = data["urls"]["regular"]
+                    image_url = resp.json()["urls"]["regular"]
                     print(f"Image from Unsplash ({query}): {image_url[:50]}...")
             except Exception as e:
                 print(f"Unsplash fallback failed: {e}")
@@ -651,8 +745,7 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
         await notify_recipients(f"Новость опубликована:\n{post_text[:200]}...")
 
 # ────────────────────────────────────────────────
-# EDUCATION POST LOGIC (17:00)
-# Even count = Activat VC lesson, Odd count = global topic
+# EDUCATION POST LOGIC
 # ────────────────────────────────────────────────
 async def run_education(posted_count: int, approval_mode: bool):
     print("MODE: EDUCATION (17:00)")
@@ -677,66 +770,65 @@ async def run_education(posted_count: int, approval_mode: bool):
     already = is_already_posted(dedup_key)
     if not already and use_activat and youtube_url:
         already = is_already_posted(youtube_url)
+    if not already:
+        already = is_already_pending(youtube_url if (use_activat and youtube_url) else dedup_key)
+
     if already:
-        print(f"Topic already used: {topic}")
+        print(f"Topic already used or pending: {topic}")
         if use_activat:
-            next_idx = (idx + 1) % len(ACTIVAT_LESSONS)
+            next_idx    = (idx + 1) % len(ACTIVAT_LESSONS)
             next_lesson = ACTIVAT_LESSONS[next_idx]
-            next_key = f"activat_{next_lesson['title'][:60]}"
-            next_yt = next_lesson["youtube_url"]
-            if not is_already_posted(next_key) and not is_already_posted(next_yt):
+            next_key    = f"activat_{next_lesson['title'][:60]}"
+            next_yt     = next_lesson["youtube_url"]
+            if (not is_already_posted(next_key) and not is_already_posted(next_yt)
+                    and not is_already_pending(next_yt)):
                 print(f"Switching to next lesson: {next_lesson['title']}")
-                lesson = next_lesson
-                topic = next_lesson["title"]
+                lesson      = next_lesson
+                topic       = next_lesson["title"]
                 youtube_url = next_lesson["youtube_url"]
-                dedup_key = next_key
+                dedup_key   = next_key
             else:
-                await notify_recipients("Обучение: тема уже использована, пропускаю.")
+                await notify_recipients("Обучение: тема уже использована или ожидает одобрения.")
                 return
         else:
-            await notify_recipients("Обучение: тема уже использована, пропускаю.")
+            await notify_recipients("Обучение: тема уже использована или ожидает одобрения.")
             return
 
     lesson_transcript = lesson.get("transcript", "") if use_activat else ""
-    if use_activat:
-        print(f"Using stored transcript: {len(lesson_transcript)} chars")
 
     try:
         if use_activat:
             prompt = (
                 "Ты редактор Telegram-канала о венчурном капитале в Центральной Азии.\n"
-                "Напиши короткий обучающий пост на РУССКОМ языке строго по этому конспекту урока.\n\n"
+                "Напиши короткий обучающий пост на РУССКОМ языке строго по этому конспекту.\n\n"
                 f"Тема: \"{topic}\"\n\n"
                 f"Конспект:\n{lesson_transcript}\n\n"
                 "Требования:\n"
-                "- Используй ТОЛЬКО факты и примеры из конспекта, ничего не придумывай\n"
+                "- Только факты из конспекта\n"
                 "- Длина: 200-350 символов\n"
                 "- Начни ТОЧНО со слова: Обучение\n"
-                "- Объясняй просто, с конкретными примерами из конспекта\n"
                 "- Без эмодзи и смайликов\n"
                 "- Без хэштегов\n"
                 f"- Последняя строка: Смотреть урок: {youtube_url}\n"
             )
-            expected = "Обучение"
         else:
             prompt = (
                 "Ты редактор Telegram-канала о венчурном капитале в Центральной Азии.\n"
-                "Напиши короткий обучающий пост на РУССКОМ языке по этой теме:\n\n"
+                "Напиши короткий обучающий пост на РУССКОМ языке.\n\n"
                 f"Тема: \"{topic}\"\n\n"
                 "Требования:\n"
                 "- Длина: 200-350 символов\n"
                 "- Начни ТОЧНО со слова: Обучение\n"
-                "- Объясняй просто для начинающих фаундеров, с конкретными примерами и цифрами\n"
+                "- Конкретные примеры и цифры\n"
                 "- Без эмодзи и смайликов\n"
                 "- Без хэштегов\n"
                 "- Заверши конкретным вопросом для обсуждения\n"
             )
-            expected = "Обучение"
 
         post_text = gemini_generate(prompt)
 
-        if not post_text.startswith(expected):
-            post_text = f"{expected}\n\n{post_text}"
+        if not post_text.startswith("Обучение"):
+            post_text = f"Обучение\n\n{post_text}"
 
         if use_activat and youtube_url and youtube_url not in post_text:
             post_text = f"{post_text}\n\nСмотреть урок: {youtube_url}"
@@ -748,13 +840,7 @@ async def run_education(posted_count: int, approval_mode: bool):
         await notify_recipients(f"Groq error (обучение): {str(e)}")
         return
 
-    candidate = {
-        "title":  topic,
-        "url":    youtube_url,
-        "region": "Education",
-        "key":    dedup_key,
-    }
-
+    candidate = {"title": topic, "url": youtube_url, "region": "Education", "key": dedup_key}
     source_tag = f"Activat VC: {youtube_url}" if use_activat else "Global VC topic"
 
     if approval_mode:
@@ -787,8 +873,11 @@ async def run_education(posted_count: int, approval_mode: bool):
 async def main():
     print(f"STARTING | {datetime.utcnow().isoformat()} UTC | TYPE: {POST_TYPE.upper()}")
 
+    # FIX: Expire stale pending posts first — this is what caused daily duplicates
+    expired = expire_old_pending_posts()
+    print(f"Cleaned up {expired} expired pending posts.")
+
     negative_rules = fetch_negative_constraints()
-    print(f"Anti-cases loaded: {len(negative_rules)}")
 
     posted_count  = get_posted_count()
     approval_mode = posted_count < 100
