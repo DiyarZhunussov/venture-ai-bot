@@ -623,6 +623,137 @@ def get_approved_examples(region: str = None, limit: int = 3) -> list:
         return []
 
 
+
+# ────────────────────────────────────────────────
+# RSS DIRECT FEEDS
+#
+# Читаем ЦА и мировые VC-источники напрямую через RSS.
+# Это независимо от Tavily — бот видит все свежие статьи
+# сразу после публикации, не дожидаясь индексации.
+#
+# Структура RSS_FEEDS:
+#   url    — адрес RSS-фида
+#   region — Kazakhstan / CentralAsia / World
+#   priority — как в SEARCH_QUERIES (меньше = важнее)
+# ────────────────────────────────────────────────
+RSS_FEEDS = [
+    # ── Казахстан ──────────────────────────────────
+    {"url": "https://digitalbusiness.kz/feed/",                       "region": "Kazakhstan",  "priority": 0},
+    {"url": "https://astanatimes.com/feed/",                           "region": "Kazakhstan",  "priority": 0},
+    {"url": "https://the-tech.kz/feed/",                              "region": "Kazakhstan",  "priority": 0},
+    {"url": "https://timesca.com/feed/",                              "region": "Kazakhstan",  "priority": 0},
+    {"url": "https://forbes.kz/rss/",                                 "region": "Kazakhstan",  "priority": 1},
+
+    # ── Центральная Азия ───────────────────────────
+    {"url": "https://daryo.uz/feed/",                                 "region": "CentralAsia", "priority": 1},
+    {"url": "https://www.gazeta.uz/ru/rss/",                          "region": "CentralAsia", "priority": 1},
+    {"url": "https://kun.uz/rss",                                     "region": "CentralAsia", "priority": 1},
+    {"url": "https://dunyo.info/ru/rss",                              "region": "CentralAsia", "priority": 1},
+    {"url": "https://economist.kg/feed/",                             "region": "CentralAsia", "priority": 1},
+
+    # ── Мировые VC ─────────────────────────────────
+    {"url": "https://techcrunch.com/category/startups/feed/",         "region": "World",       "priority": 2},
+    {"url": "https://siliconangle.com/feed/",                         "region": "World",       "priority": 2},
+    {"url": "https://venturebeat.com/category/ai/feed/",              "region": "World",       "priority": 2},
+    {"url": "https://theaiinsider.tech/feed/",                        "region": "World",       "priority": 2},
+]
+
+# VC-ключевые слова для фильтрации RSS статей (те же что в is_vc_relevant)
+RSS_VC_KEYWORDS = [
+    "стартап", "венчур", "инвестиц", "раунд", "финансирован",
+    "startup", "venture", "funding", "raised", "series a", "series b",
+    "seed", "pre-seed", "investor", "unicorn", "accelerator",
+    "ipo", "acquisition", "инвест",
+]
+
+
+def fetch_rss_candidates(days: int = 5) -> list:
+    """
+    Читает все RSS_FEEDS и возвращает свежие VC-релевантные статьи.
+    Требует: pip install feedparser
+    Если feedparser не установлен — тихо возвращает пустой список.
+    """
+    try:
+        import feedparser
+    except ImportError:
+        print("feedparser not installed — RSS feeds skipped. Add to requirements.txt")
+        return []
+
+    from dateutil import parser as dateparser
+    import re
+
+    cutoff   = datetime.utcnow().timestamp() - 86400 * days
+    results  = []
+    seen_urls = set()
+
+    for feed_cfg in RSS_FEEDS:
+        feed_url = feed_cfg["url"]
+        region   = feed_cfg["region"]
+        priority = feed_cfg["priority"]
+
+        try:
+            feed = feedparser.parse(feed_url)
+            if feed.bozo and not feed.entries:
+                print(f"RSS parse error ({feed_url[:50]}): {feed.bozo_exception}")
+                continue
+
+            count = 0
+            for entry in feed.entries:
+                url = entry.get("link", "")
+                if not url or url in seen_urls:
+                    continue
+
+                title   = entry.get("title", "").strip()
+                snippet = entry.get("summary", "")[:400].strip()
+
+                # Определяем дату публикации
+                pub_date = None
+                for date_field in ["published_parsed", "updated_parsed"]:
+                    if hasattr(entry, date_field) and getattr(entry, date_field):
+                        import calendar
+                        pub_date = calendar.timegm(getattr(entry, date_field))
+                        break
+
+                # Fallback: дата из URL
+                if not pub_date:
+                    m = re.search(r'/(20\d{2})[/-](\d{2})[/-](\d{2})', url)
+                    if m:
+                        try:
+                            pub_date = dateparser.parse(f"{m.group(1)}-{m.group(2)}-{m.group(3)}").timestamp()
+                        except Exception:
+                            pass
+
+                # Пропускаем если старее окна
+                if pub_date and pub_date < cutoff:
+                    continue
+
+                # Фильтр VC-релевантности (упрощённый — без prohibitions, они применятся позже)
+                content_lower = (title + " " + snippet).lower()
+                if not any(kw in content_lower for kw in RSS_VC_KEYWORDS):
+                    continue
+
+                seen_urls.add(url)
+                results.append({
+                    "title":    title,
+                    "url":      url,
+                    "snippet":  snippet,
+                    "region":   region,
+                    "priority": priority,
+                    "key":      url,
+                    "source":   "rss",
+                })
+                count += 1
+
+            if count > 0:
+                print(f"RSS [{region}] {feed_url[:45]}: {count} новых статей")
+
+        except Exception as e:
+            print(f"RSS feed failed ({feed_url[:50]}): {e}")
+            continue
+
+    print(f"RSS total candidates: {len(results)}")
+    return results
+
 # ────────────────────────────────────────────────
 # TAVILY SEARCH
 # ────────────────────────────────────────────────
@@ -1029,17 +1160,45 @@ async def run_news(posted_count: int, approval_mode: bool, intents: dict):
                 unique.append(c)
         return unique
 
+    # ── Шаг 1: RSS-фиды (прямое чтение источников) ──
+    print("Reading RSS feeds...")
+    rss_raw = fetch_rss_candidates(days=5)
+
+    # Фильтруем RSS через те же проверки что и Tavily-результаты
+    rss_candidates = []
+    rss_seen = set()
+    for r in rss_raw:
+        if r["url"] in rss_seen:
+            continue
+        if is_already_posted(r["url"]):
+            continue
+        if is_already_pending(r["url"]):
+            continue
+        if not is_vc_relevant(r["title"], r["snippet"], prohibitions):
+            continue
+        rss_seen.add(r["url"])
+        rss_candidates.append(r)
+
+    print(f"RSS candidates after filter: {len(rss_candidates)}")
+
+    # ── Шаг 2: Tavily (поиск по запросам) ──
     print("Searching via Tavily (5-day window)...")
-    all_candidates = _collect_candidates(active_queries, days=5)
-    print(f"Candidates (5-day): {len(all_candidates)}")
+    tavily_candidates = _collect_candidates(active_queries, days=5)
+    print(f"Tavily candidates (5-day): {len(tavily_candidates)}")
 
-    # Fallback: расширяем до 7 дней если мало кандидатов
-    if len(all_candidates) < 3:
-        print("Too few candidates — expanding to 7-day window...")
-        all_candidates = _collect_candidates(active_queries, days=7)
-        print(f"Candidates (7-day): {len(all_candidates)}")
+    # Fallback: расширяем до 7 дней если мало кандидатов от Tavily
+    if len(tavily_candidates) < 3:
+        print("Too few Tavily candidates — expanding to 7-day window...")
+        tavily_candidates = _collect_candidates(active_queries, days=7)
+        print(f"Tavily candidates (7-day): {len(tavily_candidates)}")
 
-    print(f"Candidates after filter: {len(all_candidates)}")
+    # ── Объединяем: RSS первыми (они свежее и точнее) ──
+    # Дедупликация по URL между RSS и Tavily
+    tavily_urls = {c["url"] for c in rss_candidates}
+    tavily_unique = [c for c in tavily_candidates if c["url"] not in tavily_urls]
+    all_candidates = rss_candidates + tavily_unique
+
+    print(f"Total candidates (RSS + Tavily): {len(all_candidates)}")
 
     if not all_candidates:
         print("No suitable news found.")
