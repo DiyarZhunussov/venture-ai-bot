@@ -133,7 +133,7 @@ def make_approval_keyboard(pending_id: str) -> InlineKeyboardMarkup:
     ])
 
 def make_reject_reason_keyboard(pending_id: str) -> InlineKeyboardMarkup:
-    """Варианты причин отклонения."""
+    """Варианты причин отклонения + кнопка Назад."""
     reasons = [
         ("Не про VC",        "not_vc"),
         ("Геополитика",      "geopolitics"),
@@ -151,6 +151,8 @@ def make_reject_reason_keyboard(pending_id: str) -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
+    # Кнопка Назад — возвращает к исходным кнопкам Одобрить/Отклонить
+    buttons.append([InlineKeyboardButton("← Назад", callback_data=f"back_to_approval:{pending_id}")])
     return InlineKeyboardMarkup(buttons)
 
 # ────────────────────────────────────────────────
@@ -293,6 +295,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "cancel_delete":
         await query.edit_message_text("Удаление отменено.")
+
+    # ── Назад → вернуть кнопки Одобрить/Отклонить ──
+    elif data.startswith("back_to_approval:"):
+        pending_id = data.split(":", 1)[1]
+        post = get_post_by_id(pending_id)
+        if not post or post["status"] != "pending":
+            await query.edit_message_text("Пост уже обработан.")
+            return
+        # Восстанавливаем исходное сообщение с кнопками одобрения
+        preview = post["post_text"][:800]
+        await query.edit_message_text(
+            preview,
+            reply_markup=make_approval_keyboard(pending_id),
+        )
 
 
 async def _cross_notify(sender_id: int, message: str):
