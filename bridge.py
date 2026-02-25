@@ -38,9 +38,36 @@ if not TAVILY_API_KEY:
 # ────────────────────────────────────────────────
 groq_client  = Groq(api_key=GROQ_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# bot используется только для send_to_channel (публикация фото в канал)
+# notify_recipients и notify_approval идут через _tg_post — sync requests.post
+# это избегает зависаний httpx в GitHub Actions (Timed out)
 bot          = Bot(token=TELEGRAM_BOT_TOKEN)
-# bot используется и для публикации и для сообщений на одобрение с кнопками
 tavily       = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
+
+
+def _tg_post(chat_id: str, text: str, reply_markup_dict: dict = None) -> bool:
+    """
+    Синхронный HTTP запрос к Telegram Bot API.
+    Используется вместо await bot.send_message() чтобы избежать
+    зависаний httpx в GitHub Actions (Timed out).
+    """
+    import json
+    url     = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id":                  chat_id,
+        "text":                     text[:4096],
+        "disable_web_page_preview": True,
+    }
+    if reply_markup_dict:
+        payload["reply_markup"] = json.dumps(reply_markup_dict)
+    try:
+        resp = requests.post(url, json=payload, timeout=15)
+        if not resp.ok:
+            print(f"Telegram API error {resp.status_code}: {resp.text[:200]}")
+        return resp.ok
+    except Exception as e:
+        print(f"_tg_post failed: {e}")
+        return False
 
 # ────────────────────────────────────────────────
 # INLINE KEYBOARD BUILDER
@@ -69,37 +96,31 @@ def gemini_generate(prompt: str) -> str:
 # ────────────────────────────────────────────────
 # NOTIFY RECIPIENTS
 # ────────────────────────────────────────────────
-async def notify_recipients(message: str):
-    """Обычное текстовое уведомление (для ошибок, статусов и т.д.)"""
-    await bot.send_message(TELEGRAM_ADMIN_ID, message)
-    if TELEGRAM_FOUNDER_ID and TELEGRAM_FOUNDER_ID != TELEGRAM_ADMIN_ID:
-        try:
-            await bot.send_message(TELEGRAM_FOUNDER_ID, message)
-        except Exception as e:
-            print(f"Failed to notify founder: {e}")
-
-
-async def notify_approval(pending_id: str, preview_text: str):
+def notify_recipients(message: str):
     """
-    Отправляет пост на одобрение с inline-кнопками.
+    Синхронное текстовое уведомление через requests.post.
+    Не использует await bot.send_message() — это предотвращает
+    зависания httpx в GitHub Actions (Timed out).
+    """
+    _tg_post(TELEGRAM_ADMIN_ID, message)
+    if TELEGRAM_FOUNDER_ID and TELEGRAM_FOUNDER_ID != TELEGRAM_ADMIN_ID:
+        _tg_post(TELEGRAM_FOUNDER_ID, message)
+
+
+def notify_approval(pending_id: str, preview_text: str):
+    """
+    Отправляет пост на одобрение с inline-кнопками через sync requests.post.
     Кнопки обрабатывает feedback_bot.py (Render) — он слушает тот же TELEGRAM_BOT_TOKEN.
     """
-    keyboard = make_approval_keyboard(pending_id)
-
-    await bot.send_message(
-        chat_id=TELEGRAM_ADMIN_ID,
-        text=preview_text,
-        reply_markup=keyboard,
-    )
+    keyboard_dict = {
+        "inline_keyboard": [[
+            {"text": "✅ Одобрить",  "callback_data": f"approve:{pending_id}"},
+            {"text": "❌ Отклонить", "callback_data": f"reject_menu:{pending_id}"},
+        ]]
+    }
+    _tg_post(TELEGRAM_ADMIN_ID, preview_text, reply_markup_dict=keyboard_dict)
     if TELEGRAM_FOUNDER_ID and TELEGRAM_FOUNDER_ID != TELEGRAM_ADMIN_ID:
-        try:
-            await bot.send_message(
-                chat_id=TELEGRAM_FOUNDER_ID,
-                text=preview_text,
-                reply_markup=keyboard,
-            )
-        except Exception as e:
-            print(f"Failed to notify founder: {e}")
+        _tg_post(TELEGRAM_FOUNDER_ID, preview_text, reply_markup_dict=keyboard_dict)
 
 # ────────────────────────────────────────────────
 # SEARCH QUERIES BY REGION
@@ -1106,7 +1127,7 @@ async def send_to_channel(text: str, image_url: str, thread_id: str = None):
                 await bot.send_message(text=text, disable_web_page_preview=False, **kwargs)
             except TelegramError as te2:
                 print(f"Retry also failed: {te2}")
-                await notify_recipients(f"Send error: {str(te2)}")
+                notify_recipients(f"Send error: {str(te2)}")
 
 # ────────────────────────────────────────────────
 # NEWS POST LOGIC
@@ -1202,7 +1223,7 @@ async def run_news(posted_count: int, approval_mode: bool, intents: dict):
 
     if not all_candidates:
         print("No suitable news found.")
-        await notify_recipients("Main Bot: сегодня не нашлось подходящих новостей.")
+        notify_recipients("Main Bot: сегодня не нашлось подходящих новостей.")
         return
 
     # Apply priority boosts from feedback
@@ -1231,7 +1252,7 @@ async def run_news(posted_count: int, approval_mode: bool, intents: dict):
 
     if not best:
         print("All candidates are semantic duplicates of recent posts.")
-        await notify_recipients("Main Bot: все найденные новости — дубли недавних публикаций.")
+        notify_recipients("Main Bot: все найденные новости — дубли недавних публикаций.")
         return
 
     print(f"Selected [{best['region']}]: {best['title']}")
@@ -1349,13 +1370,13 @@ async def run_news(posted_count: int, approval_mode: bool, intents: dict):
 
     except Exception as e:
         print(f"Gemini error: {e}")
-        await notify_recipients(f"Groq error: {str(e)}")
+        notify_recipients(f"Groq error: {str(e)}")
         return
 
     if approval_mode:
         pending_id = save_pending_post(best, post_text, image_url)
         if not pending_id:
-            await notify_recipients("Не удалось сохранить пост для одобрения.")
+            notify_recipients("Не удалось сохранить пост для одобрения.")
             return
         quality_line = ""
         if quality:
@@ -1369,13 +1390,13 @@ async def run_news(posted_count: int, approval_mode: bool, intents: dict):
             f"{'─' * 28}\n"
             f"{post_text}"
         )
-        await notify_approval(pending_id, preview)
+        notify_approval(pending_id, preview)
         print(f"Sent for approval with buttons. ID: {pending_id}")
     else:
         await send_to_channel(post_text, image_url, NEWS_THREAD_ID)
         add_to_posted(best["key"], "NEWS", 8, best["region"], title=best.get("title", ""))
         print("PUBLISHED!")
-        await notify_recipients(f"Новость опубликована:\n{post_text[:200]}...")
+        notify_recipients(f"Новость опубликована:\n{post_text[:200]}...")
 
 # ────────────────────────────────────────────────
 # EDUCATION POST LOGIC
@@ -1421,10 +1442,10 @@ async def run_education(posted_count: int, approval_mode: bool):
                 youtube_url = next_lesson["youtube_url"]
                 dedup_key   = next_key
             else:
-                await notify_recipients("Обучение: тема уже использована или ожидает одобрения.")
+                notify_recipients("Обучение: тема уже использована или ожидает одобрения.")
                 return
         else:
-            await notify_recipients("Обучение: тема уже использована или ожидает одобрения.")
+            notify_recipients("Обучение: тема уже использована или ожидает одобрения.")
             return
 
     lesson_transcript = lesson.get("transcript", "") if use_activat else ""
@@ -1469,7 +1490,7 @@ async def run_education(posted_count: int, approval_mode: bool):
 
     except Exception as e:
         print(f"Gemini error: {e}")
-        await notify_recipients(f"Groq error (обучение): {str(e)}")
+        notify_recipients(f"Groq error (обучение): {str(e)}")
         return
 
     candidate  = {"title": topic, "url": youtube_url, "region": "Education", "key": dedup_key}
@@ -1478,7 +1499,7 @@ async def run_education(posted_count: int, approval_mode: bool):
     if approval_mode:
         pending_id = save_pending_post(candidate, post_text, None)
         if not pending_id:
-            await notify_recipients("Не удалось сохранить обучающий пост.")
+            notify_recipients("Не удалось сохранить обучающий пост.")
             return
         preview = (
             f"ОБУЧЕНИЕ НА ОДОБРЕНИЕ (#{posted_count + 1}/100)\n"
@@ -1486,7 +1507,7 @@ async def run_education(posted_count: int, approval_mode: bool):
             f"{'─' * 28}\n"
             f"{post_text}"
         )
-        await notify_approval(pending_id, preview)
+        notify_approval(pending_id, preview)
         print(f"Education sent for approval with buttons. ID: {pending_id}")
     else:
         await send_to_channel(post_text, None, EDUCATION_THREAD_ID)
@@ -1494,7 +1515,7 @@ async def run_education(posted_count: int, approval_mode: bool):
         if use_activat and youtube_url:
             add_to_posted(youtube_url, "EDUCATION", 8, "Education", title=topic)
         print("EDUCATION PUBLISHED!")
-        await notify_recipients(f"Обучение опубликовано:\n{post_text[:200]}...")
+        notify_recipients(f"Обучение опубликовано:\n{post_text[:200]}...")
 
 # ────────────────────────────────────────────────
 # MAIN
