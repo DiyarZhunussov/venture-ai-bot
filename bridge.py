@@ -519,58 +519,80 @@ def get_rejected_post_summaries(limit: int = 20) -> list:
 # ────────────────────────────────────────────────
 # TAVILY SEARCH
 # ────────────────────────────────────────────────
-def tavily_search(query: str, max_results: int = 5) -> list:
+BLOCKED_DOMAINS = [
+    "tracxn.com", "crunchbase.com", "pitchbook.com",
+    "statista.com", "similarweb.com", "dealroom.co",
+    "dealroom.net", "topstartups.io", "openvc.app",
+    "vcsheet.com", "failory.com", "fundraiseinsider.com",
+    "tadviser.ru", "wikipedia.org", "wikia.com",
+    "instagram.com", "facebook.com", "linkedin.com",
+    "twitter.com", "t.me", "youtube.com",
+    "ventureforum.asia", "startupbase.uz", "startupcup.asia",
+    "shizune.co", "alleywatch.com",
+]
+
+# Источники которым доверяем даже без даты в URL
+TRUSTED_NODATELESS_DOMAINS = [
+    "astanahub.com", "timesca.com", "qazinform.com",
+    "the-tech.kz", "aifc.kz", "gazeta.uz", "arabfounders.net",
+    "dominovc.com", "investready.uz", "dunyo.info",
+]
+
+def tavily_search(query: str, max_results: int = 5, days: int = 5) -> list:
+    """
+    days: окно поиска. По умолчанию 5 дней.
+    Статьи без даты в URL принимаются если домен в TRUSTED_NODATELESS_DOMAINS.
+    """
     if not tavily:
         return []
     try:
+        import re
+        from dateutil import parser as dateparser
+
         response = tavily.search(
             query=query,
             search_depth="basic",
             max_results=max_results,
-            days=3,
+            days=days,
         )
         results = []
-        cutoff = datetime.utcnow().timestamp() - 86400 * 3
-        from dateutil import parser as dateparser
-        BLOCKED_DOMAINS = [
-            "tracxn.com", "crunchbase.com", "pitchbook.com",
-            "statista.com", "similarweb.com", "dealroom.co",
-            "dealroom.net", "topstartups.io", "openvc.app",
-            "vcsheet.com", "failory.com", "fundraiseinsider.com",
-            "tadviser.ru", "wikipedia.org", "wikia.com",
-            "instagram.com", "facebook.com", "linkedin.com",
-            "twitter.com", "t.me", "youtube.com",
-            "ventureforum.asia", "startupbase.uz", "startupcup.asia",
-            "shizune.co", "alleywatch.com",
-        ]
+        cutoff = datetime.utcnow().timestamp() - 86400 * days
 
         for r in response.get("results", []):
             url = r.get("url", "")
             if any(domain in url for domain in BLOCKED_DOMAINS):
-                print(f"Blocked aggregator: {url}")
+                print(f"Blocked: {url[:70]}")
                 continue
 
             pub_date = r.get("published_date")
+
+            # Попытка 1: дата из Tavily API
+            # Попытка 2: дата из URL (YYYY-MM-DD)
             if not pub_date:
-                import re
-                url_date_match = re.search(r'/(20\d{2})[/-](\d{2})[/-](\d{2})', url)
-                if url_date_match:
-                    y, m, d = url_date_match.groups()
-                    pub_date = f"{y}-{m}-{d}"
+                m = re.search(r'/(20\d{2})[/-](\d{2})[/-](\d{2})', url)
+                if m:
+                    pub_date = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
                 else:
-                    url_ym_match = re.search(r'/(20\d{2})/(\d{2})/', url)
-                    if url_ym_match:
-                        y, m = url_ym_match.groups()
-                        pub_date = f"{y}-{m}-01"
+                    # Попытка 3: только год/месяц из URL
+                    m2 = re.search(r'/(20\d{2})/(\d{2})/', url)
+                    if m2:
+                        pub_date = f"{m2.group(1)}-{m2.group(2)}-01"
 
+            # Попытка 4: доверенный домен без даты — принимаем как свежий
             if not pub_date:
-                print(f"No date found, skipping: {url}")
-                continue
+                is_trusted = any(d in url for d in TRUSTED_NODATELESS_DOMAINS)
+                if is_trusted:
+                    print(f"Trusted domain (no date): {url[:70]}")
+                    pub_date = datetime.utcnow().strftime("%Y-%m-%d")
+                else:
+                    print(f"No date, skipping: {url[:70]}")
+                    continue
 
+            # Проверяем что не старее окна
             try:
                 pub_ts = dateparser.parse(pub_date).timestamp()
                 if pub_ts < cutoff:
-                    print(f"Too old ({pub_date}): {url}")
+                    print(f"Too old ({pub_date}): {url[:70]}")
                     continue
             except Exception:
                 pass
@@ -579,7 +601,7 @@ def tavily_search(query: str, max_results: int = 5) -> list:
                 "title":    r.get("title", ""),
                 "url":      url,
                 "snippet":  r.get("content", "")[:400],
-                "pub_date": pub_date or "",
+                "pub_date": pub_date,
             })
         return results
     except Exception as e:
@@ -871,37 +893,44 @@ async def run_news(posted_count: int, approval_mode: bool, intents: dict):
         active_queries = entity_queries + active_queries
         print(f"Tracked entities — added {len(entity_queries)} company-specific queries.")
 
-    all_candidates = []
+    def _collect_candidates(queries, days):
+        found = []
+        for search in queries:
+            results = tavily_search(search["query"], max_results=10, days=days)
+            for r in results:
+                if is_already_posted(r["url"]):
+                    print(f"Already posted: {r['url'][:65]}")
+                    continue
+                if is_already_pending(r["url"]):
+                    print(f"Already pending: {r['url'][:65]}")
+                    continue
+                if not is_vc_relevant(r["title"], r["snippet"], prohibitions):
+                    continue
+                found.append({
+                    "title":    r["title"],
+                    "url":      r["url"],
+                    "snippet":  r["snippet"],
+                    "region":   search["region"],
+                    "priority": search["priority"],
+                    "key":      r["url"],
+                })
+        # Deduplicate by URL
+        seen, unique = set(), []
+        for c in found:
+            if c["url"] not in seen:
+                seen.add(c["url"])
+                unique.append(c)
+        return unique
 
-    print("Searching via Tavily...")
-    for search in active_queries:
-        results = tavily_search(search["query"], max_results=10)
-        for r in results:
-            if is_already_posted(r["url"]):
-                print(f"Already in posted_news: {r['url'][:60]}")
-                continue
-            if is_already_pending(r["url"]):
-                print(f"Already pending approval: {r['url'][:60]}")
-                continue
-            if not is_vc_relevant(r["title"], r["snippet"], prohibitions):
-                continue
-            all_candidates.append({
-                "title":    r["title"],
-                "url":      r["url"],
-                "snippet":  r["snippet"],
-                "region":   search["region"],
-                "priority": search["priority"],
-                "key":      r["url"],
-            })
+    print("Searching via Tavily (5-day window)...")
+    all_candidates = _collect_candidates(active_queries, days=5)
+    print(f"Candidates (5-day): {len(all_candidates)}")
 
-    # Deduplicate by URL
-    seen = set()
-    unique = []
-    for c in all_candidates:
-        if c["url"] not in seen:
-            seen.add(c["url"])
-            unique.append(c)
-    all_candidates = unique
+    # Fallback: расширяем до 7 дней если мало кандидатов
+    if len(all_candidates) < 3:
+        print("Too few candidates — expanding to 7-day window...")
+        all_candidates = _collect_candidates(active_queries, days=7)
+        print(f"Candidates (7-day): {len(all_candidates)}")
 
     print(f"Candidates after filter: {len(all_candidates)}")
 
