@@ -554,6 +554,76 @@ def get_rejected_post_summaries(limit: int = 20) -> list:
     return summaries
 
 # ────────────────────────────────────────────────
+# FEW-SHOT: ЗАГРУЗКА ОДОБРЕННЫХ ПОСТОВ КАК ПРИМЕРОВ
+#
+# Принцип работы:
+#   - Каждый раз когда фаундер одобряет пост — он голосует за качество
+#   - Накапливаем эти посты в pending_posts (status=approved)
+#   - При генерации нового поста показываем 2-3 лучших примера ИИ
+#   - ИИ копирует СТИЛЬ примеров, но факты берёт ТОЛЬКО из сниппета
+#
+# Защита от галлюцинаций:
+#   - Примеры используются только для стиля (длина, тон, структура)
+#   - Промпт явно запрещает добавлять факты не из источника
+#   - Quality scorer отсекает посты с выдуманными цифрами
+# ────────────────────────────────────────────────
+def get_approved_examples(region: str = None, limit: int = 3) -> list:
+    """
+    Загружает одобренные посты из pending_posts как few-shot примеры.
+    Приоритет отдаётся постам того же региона что и текущая статья.
+    Возвращает список строк — готовых постов без URL.
+    """
+    try:
+        examples = []
+
+        # Сначала ищем примеры того же региона
+        if region:
+            res = supabase.table("pending_posts") \
+                .select("post_text, region") \
+                .eq("status", "approved") \
+                .eq("region", region) \
+                .order("created_at", desc=True) \
+                .limit(limit) \
+                .execute()
+            for row in res.data or []:
+                text = row.get("post_text", "").strip()
+                # Убираем URL из конца поста — пример должен быть только текстом
+                lines = [l for l in text.split("\n") if not l.startswith("http")]
+                clean = "\n".join(lines).strip()
+                if clean and len(clean) > 80:
+                    examples.append(clean)
+
+        # Если мало примеров того же региона — добиваем из любых
+        if len(examples) < limit:
+            needed = limit - len(examples)
+            res2 = supabase.table("pending_posts") \
+                .select("post_text, region") \
+                .eq("status", "approved") \
+                .order("created_at", desc=True) \
+                .limit(limit * 3) \
+                .execute()
+            for row in res2.data or []:
+                if len(examples) >= limit:
+                    break
+                text = row.get("post_text", "").strip()
+                lines = [l for l in text.split("\n") if not l.startswith("http")]
+                clean = "\n".join(lines).strip()
+                if clean and len(clean) > 80 and clean not in examples:
+                    examples.append(clean)
+
+        if examples:
+            print(f"Few-shot examples loaded: {len(examples)} approved posts (region={region})")
+        else:
+            print("Few-shot: no approved posts yet — will improve after first approvals")
+
+        return examples[:limit]
+
+    except Exception as e:
+        print(f"Few-shot load error (non-critical): {e}")
+        return []
+
+
+# ────────────────────────────────────────────────
 # TAVILY SEARCH
 # ────────────────────────────────────────────────
 BLOCKED_DOMAINS = [
@@ -1020,11 +1090,28 @@ async def run_news(posted_count: int, approval_mode: bool, intents: dict):
         for rule in prohibitions[:8]:
             constraint_context += f"  - {rule}\n"
 
+    # Загружаем одобренные посты как few-shot примеры стиля
+    few_shot_examples = get_approved_examples(region=best["region"], limit=3)
+
     try:
+        # Формируем блок с примерами (только если они есть)
+        examples_block = ""
+        if few_shot_examples:
+            examples_block = (
+                "\nПРИМЕРЫ ОДОБРЕННЫХ ПОСТОВ (учись СТИЛЮ, НЕ фактам):\n"
+                "Изучи длину, тон, структуру этих постов. "
+                "Факты для нового поста бери ТОЛЬКО из раздела Содержание ниже.\n"
+            )
+            for i, ex in enumerate(few_shot_examples, 1):
+                examples_block += f"\n--- Пример {i} ---\n{ex}\n"
+            examples_block += "--- Конец примеров ---\n"
+
         prompt = (
             "Ты редактор Telegram-канала о венчурном капитале в Центральной Азии.\n"
-            "Напиши новостной пост на РУССКОМ языке строго по этой статье.\n\n"
-            f"Заголовок статьи: {best['title']}\n"
+            "Напиши новостной пост на РУССКОМ языке строго по этой статье.\n"
+            f"{examples_block}\n"
+            "ИСТОЧНИК (используй ТОЛЬКО эти факты, не добавляй ничего от себя):\n"
+            f"Заголовок: {best['title']}\n"
             f"Содержание: {best['snippet']}\n"
             f"Ссылка: {best['url']}\n\n"
             f"ВАЖНО про страну: {region_country_hint}. "
@@ -1034,13 +1121,13 @@ async def run_news(posted_count: int, approval_mode: bool, intents: dict):
             f"Начни пост ТОЧНО со слова: {region_header}\n"
             "Затем пустая строка, затем сам пост.\n\n"
             "Структура поста — ровно 2 предложения:\n"
-            "1. Что произошло — кто, что, сколько (конкретные цифры и факты из статьи).\n"
-            "2. Конкретный вывод или последствие для рынка — без общих фраз.\n\n"
+            "1. Что произошло — кто, что, сколько (конкретные цифры и факты из источника).\n"
+            "2. Конкретный вывод или последствие для рынка — только из источника, без домыслов.\n\n"
             "Правила:\n"
             "- Нейтральный деловой язык, без восторгов\n"
             "- Без эмодзи и смайликов\n"
             "- Без хэштегов\n"
-            "- Только факты из статьи\n"
+            "- ТОЛЬКО факты из источника выше — никаких домыслов\n"
             "- Длина: 200-350 символов\n"
         )
         # Generate post with up to 2 retries if quality score is too low
