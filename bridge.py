@@ -54,7 +54,7 @@ def gemini_generate(prompt: str) -> str:
     return response.choices[0].message.content.strip()
 
 # ────────────────────────────────────────────────
-# NOTIFY RECIPIENTS (admin + founder if set)
+# NOTIFY RECIPIENTS
 # ────────────────────────────────────────────────
 async def notify_recipients(message: str):
     await bot.send_message(TELEGRAM_ADMIN_ID, message)
@@ -67,17 +67,52 @@ async def notify_recipients(message: str):
 # ────────────────────────────────────────────────
 # SEARCH QUERIES BY REGION
 # ────────────────────────────────────────────────
-SEARCH_QUERIES = [
-    {"query": "Казахстан стартап инвестиции раунд февраль 2026",         "region": "Kazakhstan",  "priority": 0},
-    {"query": "Kazakhstan startup funding round raised February 2026",    "region": "Kazakhstan",  "priority": 0},
-    {"query": "Kazakhstan venture capital deal announcement 2026",        "region": "Kazakhstan",  "priority": 0},
-    {"query": "Узбекистан Кыргызстан стартап инвестиции раунд 2026",     "region": "CentralAsia", "priority": 1},
-    {"query": "Central Asia startup investment round raised 2026",        "region": "CentralAsia", "priority": 1},
-    {"query": "Центральная Азия венчур фонд сделка февраль 2026",        "region": "CentralAsia", "priority": 1},
-    {"query": "startup raised million Series A B funding February 2026",  "region": "World",       "priority": 2},
-    {"query": "venture capital deal announced this week February 2026",   "region": "World",       "priority": 2},
-    {"query": "AI startup funding round announced February 2026",         "region": "World",       "priority": 2},
-]
+def _build_search_queries() -> list:
+    """
+    Динамически генерирует поисковые запросы с актуальными датами.
+    Автоматически обновляется каждый месяц — не нужно менять код вручную.
+    """
+    now    = datetime.utcnow()
+    month_ru = {
+        1: "январь", 2: "февраль", 3: "март", 4: "апрель",
+        5: "май", 6: "июнь", 7: "июль", 8: "август",
+        9: "сентябрь", 10: "октябрь", 11: "ноябрь", 12: "декабрь",
+    }
+    month_en = {
+        1: "January", 2: "February", 3: "March", 4: "April",
+        5: "May", 6: "June", 7: "July", 8: "August",
+        9: "September", 10: "October", 11: "November", 12: "December",
+    }
+    m_ru = month_ru[now.month]
+    m_en = month_en[now.month]
+    y    = now.year
+
+    return [
+        {"query": f"Казахстан стартап инвестиции раунд {m_ru} {y}",         "region": "Kazakhstan",  "priority": 0},
+        {"query": f"Kazakhstan startup funding round raised {m_en} {y}",    "region": "Kazakhstan",  "priority": 0},
+        {"query": f"Kazakhstan venture capital deal announcement {y}",       "region": "Kazakhstan",  "priority": 0},
+        {"query": f"Узбекистан Кыргызстан стартап инвестиции раунд {y}",    "region": "CentralAsia", "priority": 1},
+        {"query": f"Central Asia startup investment round raised {y}",       "region": "CentralAsia", "priority": 1},
+        {"query": f"Центральная Азия венчур фонд сделка {m_ru} {y}",        "region": "CentralAsia", "priority": 1},
+        {"query": f"startup raised million Series A B funding {m_en} {y}",  "region": "World",       "priority": 2},
+        {"query": f"venture capital deal announced this week {m_en} {y}",   "region": "World",       "priority": 2},
+        {"query": f"AI startup funding round announced {m_en} {y}",         "region": "World",       "priority": 2},
+    ]
+
+def _build_seed_queries() -> list:
+    now  = datetime.utcnow()
+    m_en = {1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
+            7:"July",8:"August",9:"September",10:"October",11:"November",12:"December"}[now.month]
+    y    = now.year
+    return [
+        {"query": f"pre-seed startup funding Central Asia {y}",             "region": "CentralAsia", "priority": 0},
+        {"query": f"seed round startup Kazakhstan Uzbekistan {y}",          "region": "CentralAsia", "priority": 0},
+        {"query": f"pre-seed seed startup funding round {m_en} {y}",       "region": "World",       "priority": 1},
+    ]
+
+# Built at runtime so dates are always current
+SEARCH_QUERIES = _build_search_queries()
+SEED_QUERIES   = _build_seed_queries()
 
 REGION_HEADER = {
     "Kazakhstan":  "Казахстан",
@@ -177,6 +212,146 @@ GLOBAL_EDUCATION_TOPICS = [
 ]
 
 # ────────────────────────────────────────────────
+# FEEDBACK INTENT PARSER
+#
+# Разделяет фидбэк на два типа:
+#   - PROHIBITIONS: что запрещено публиковать (блокирует статьи)
+#   - PRIORITIES: что нужно публиковать чаще (буст приоритета кандидатов)
+#
+# Логика определения:
+#   Пожелание = содержит "больше", "чаще", "приоритет", "важнее", "хочу", "нужно больше", "желательно"
+#   Запрет = содержит "не нужно", "не публикуй", "без", "убери", "исключи", "не хочу"
+#   Остальное = считается запретом (безопаснее)
+# ────────────────────────────────────────────────
+
+# Слова-маркеры для определения типа фидбэка
+PRIORITY_MARKERS = [
+    "больше", "чаще", "приоритет", "важнее", "хочу видеть", "нужно больше",
+    "желательно", "предпочтительно", "фокус на", "акцент на", "давай больше",
+    "more", "focus on", "prioritize", "prefer",
+]
+
+PROHIBITION_MARKERS = [
+    "не нужно", "не публикуй", "без", "убери", "исключи", "не хочу",
+    "не надо", "избегай", "пропускай", "don't", "no ", "avoid", "skip",
+    "не про", "не о ", "не об ",
+]
+
+# Маппинг ключевых слов фидбэка → регион или тип контента для буста
+REGION_BOOST_MAP = {
+    "центральная азия": "CentralAsia",
+    "центральноазиатск": "CentralAsia",
+    "центр азия": "CentralAsia",
+    "central asia": "CentralAsia",
+    "казахстан": "Kazakhstan",
+    "kazakhstan": "Kazakhstan",
+    "узбекистан": "CentralAsia",
+    "кыргызстан": "CentralAsia",
+    "таджикистан": "CentralAsia",
+    "туркменистан": "CentralAsia",
+}
+
+STAGE_BOOST_KEYWORDS = [
+    "pre-seed", "preseed", "pre seed", "seed", "ранняя стадия",
+    "early stage", "early-stage", "ангельск", "angel",
+]
+
+
+def parse_feedback_intents(constraints: list) -> dict:
+    """
+    Разбирает список фидбэков на:
+      - prohibitions: список строк для блокировки статей (как раньше)
+      - region_boosts: список регионов которые надо поднять в приоритете
+      - stage_boost: True если нужно искать pre-seed/seed статьи
+      - priority_instructions: список строк для промпта ИИ (пожелания, не запреты)
+
+    Логирует результат в консоль чтобы было видно в GitHub Actions.
+    """
+    prohibitions = []
+    region_boosts = []
+    stage_boost = False
+    priority_instructions = []
+
+    for feedback in constraints:
+        text = feedback.lower().strip()
+
+        # Определяем тип фидбэка
+        is_priority = any(marker in text for marker in PRIORITY_MARKERS)
+        is_prohibition = any(marker in text for marker in PROHIBITION_MARKERS)
+
+        if is_priority and not is_prohibition:
+            # Это пожелание — определяем что именно буститовать
+            priority_instructions.append(feedback)
+
+            # Проверяем регион
+            for keyword, region in REGION_BOOST_MAP.items():
+                if keyword in text:
+                    if region not in region_boosts:
+                        region_boosts.append(region)
+
+            # Проверяем стадию
+            if any(kw in text for kw in STAGE_BOOST_KEYWORDS):
+                stage_boost = True
+
+        else:
+            # Это запрет (или неопределённый фидбэк — считаем запретом)
+            prohibitions.append(feedback)
+
+    # Логируем результат
+    print("=== FEEDBACK INTENT ANALYSIS ===")
+    print(f"  Prohibitions ({len(prohibitions)}): {prohibitions[:5]}")
+    print(f"  Region boosts: {region_boosts}")
+    print(f"  Stage boost (pre-seed/seed): {stage_boost}")
+    print(f"  Priority instructions ({len(priority_instructions)}): {priority_instructions[:3]}")
+    print("=" * 40)
+
+    return {
+        "prohibitions":          prohibitions,
+        "region_boosts":         region_boosts,
+        "stage_boost":           stage_boost,
+        "priority_instructions": priority_instructions,
+    }
+
+
+def apply_priority_boosts(candidates: list, intents: dict) -> list:
+    """
+    Корректирует числовой приоритет кандидатов на основе пожеланий фаундера.
+    Меньший priority = выбирается раньше (как в сортировке).
+
+    Логика бустов:
+      - Регион в region_boosts → priority -= 2 (поднять выше)
+      - Статья содержит pre-seed/seed при stage_boost → priority -= 1
+      - World при наличии region_boosts → priority += 1 (опустить ниже)
+    """
+    if not intents["region_boosts"] and not intents["stage_boost"]:
+        return candidates  # Нет пожеланий — ничего не меняем
+
+    boosted = []
+    for c in candidates:
+        new_priority = c["priority"]
+
+        # Регион буст
+        if c["region"] in intents["region_boosts"]:
+            new_priority -= 2
+            print(f"Priority boost (region {c['region']}): {c['title'][:50]}")
+
+        # Стадия буст (pre-seed, seed в заголовке или сниппете)
+        if intents["stage_boost"]:
+            content = (c["title"] + " " + c.get("snippet", "")).lower()
+            if any(kw in content for kw in STAGE_BOOST_KEYWORDS):
+                new_priority -= 1
+                print(f"Priority boost (stage pre-seed/seed): {c['title'][:50]}")
+
+        # Опускаем World если есть региональный буст
+        if intents["region_boosts"] and c["region"] == "World":
+            new_priority += 1
+
+        boosted.append({**c, "priority": new_priority})
+
+    return boosted
+
+
+# ────────────────────────────────────────────────
 # SUPABASE HELPERS
 # ────────────────────────────────────────────────
 def is_already_posted(key: str) -> bool:
@@ -188,10 +363,6 @@ def is_already_posted(key: str) -> bool:
         return False
 
 def is_already_pending(url: str) -> bool:
-    """
-    FIX #1: Check if this URL is already sitting in pending_posts awaiting approval.
-    Without this check, the bot generates the same article every day if nobody approves it.
-    """
     if not url:
         return False
     try:
@@ -202,10 +373,6 @@ def is_already_pending(url: str) -> bool:
         return False
 
 def expire_old_pending_posts():
-    """
-    FIX #2: Mark pending posts older than 2 days as 'expired'.
-    This cleans up the queue and prevents stale posts from blocking new ones.
-    """
     try:
         from datetime import timedelta
         cutoff = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
@@ -272,10 +439,6 @@ def save_pending_post(candidate: dict, post_text: str, image_url) -> str:
         return None
 
 def fetch_negative_constraints() -> list:
-    """
-    FIX #3: Logs all loaded constraints so you can see them in GitHub Actions logs.
-    This makes the 'learning' visible and debuggable.
-    """
     try:
         res = supabase.table("negative_constraints").select("feedback, created_at").execute()
         constraints = [row["feedback"].lower() for row in res.data]
@@ -285,7 +448,7 @@ def fetch_negative_constraints() -> list:
                 print(f"  [{i+1}] {c}")
             print("=" * 40)
         else:
-            print("No negative constraints in database — no rejections have been saved yet.")
+            print("No negative constraints in database.")
         return constraints
     except Exception as e:
         print(f"Error loading negative constraints: {e}")
@@ -324,10 +487,6 @@ def get_recent_post_titles(limit: int = 30) -> list:
     return titles
 
 def get_rejected_post_summaries(limit: int = 20) -> list:
-    """
-    FIX #4: Load titles of rejected posts so the AI explicitly avoids covering same topics again.
-    Previously rejected posts had no effect on future article selection.
-    """
     summaries = []
     try:
         res = supabase.table("pending_posts") \
@@ -380,39 +539,34 @@ def tavily_search(query: str, max_results: int = 5) -> list:
 
         for r in response.get("results", []):
             url = r.get("url", "")
-
             if any(domain in url for domain in BLOCKED_DOMAINS):
                 print(f"Blocked aggregator: {url}")
                 continue
 
             pub_date = r.get("published_date")
-
             if not pub_date:
                 import re
                 url_date_match = re.search(r'/(20\d{2})[/-](\d{2})[/-](\d{2})', url)
                 if url_date_match:
                     y, m, d = url_date_match.groups()
                     pub_date = f"{y}-{m}-{d}"
-                    print(f"Date from URL ({pub_date}): {url}")
                 else:
                     url_ym_match = re.search(r'/(20\d{2})/(\d{2})/', url)
                     if url_ym_match:
                         y, m = url_ym_match.groups()
                         pub_date = f"{y}-{m}-01"
-                        print(f"Date from URL month ({pub_date}): {url}")
 
             if not pub_date:
                 print(f"No date found, skipping: {url}")
                 continue
 
-            if pub_date:
-                try:
-                    pub_ts = dateparser.parse(pub_date).timestamp()
-                    if pub_ts < cutoff:
-                        print(f"Too old ({pub_date}): {url}")
-                        continue
-                except Exception:
-                    pass
+            try:
+                pub_ts = dateparser.parse(pub_date).timestamp()
+                if pub_ts < cutoff:
+                    print(f"Too old ({pub_date}): {url}")
+                    continue
+            except Exception:
+                pass
 
             results.append({
                 "title":    r.get("title", ""),
@@ -427,7 +581,6 @@ def tavily_search(query: str, max_results: int = 5) -> list:
 
 # ────────────────────────────────────────────────
 # VC RELEVANCE KEYWORD FILTER
-# FIX #5: Stricter keywords + hard excludes for geopolitics/crypto/etc
 # ────────────────────────────────────────────────
 VC_KEYWORDS = [
     "стартап", "венчурный фонд", "инвестиции в стартап", "раунд финансирования",
@@ -446,7 +599,7 @@ HARD_EXCLUDE_KEYWORDS = [
     "что стоит за", "активность сша", "активность китая",
 ]
 
-def is_vc_relevant(title: str, snippet: str, negative_rules: list) -> bool:
+def is_vc_relevant(title: str, snippet: str, prohibitions: list) -> bool:
     content = (title + " " + snippet).lower()
 
     for kw in HARD_EXCLUDE_KEYWORDS:
@@ -454,9 +607,9 @@ def is_vc_relevant(title: str, snippet: str, negative_rules: list) -> bool:
             print(f"Hard excluded ({kw}): {title[:60]}")
             return False
 
-    for rule in negative_rules:
+    for rule in prohibitions:
         if rule in content:
-            print(f"Negative constraint matched ({rule!r}): {title[:60]}")
+            print(f"Prohibition matched ({rule!r}): {title[:60]}")
             return False
 
     matched = [kw for kw in VC_KEYWORDS if kw in content]
@@ -468,9 +621,13 @@ def is_vc_relevant(title: str, snippet: str, negative_rules: list) -> bool:
 
 # ────────────────────────────────────────────────
 # GEMINI: PICK BEST ARTICLE
-# FIX #6: Now passes negative constraints + rejected titles to the AI for better selection
 # ────────────────────────────────────────────────
-async def pick_best_with_gemini(candidates: list, negative_constraints: list, rejected_titles: list) -> dict:
+async def pick_best_with_gemini(
+    candidates: list,
+    prohibitions: list,
+    rejected_titles: list,
+    priority_instructions: list,
+) -> dict:
     if not candidates:
         return None
     if len(candidates) == 1:
@@ -481,14 +638,20 @@ async def pick_best_with_gemini(candidates: list, negative_constraints: list, re
         articles_text += f"{i+1}. [{c['region']}] {c['title']}\n   {c['snippet']}\n\n"
 
     avoid_context = ""
-    if negative_constraints:
-        avoid_context += "\nPreviously REJECTED for these reasons — avoid similar content:\n"
-        for nc in negative_constraints[:10]:
-            avoid_context += f"  - {nc}\n"
+    if prohibitions:
+        avoid_context += "\nREJECTED for these reasons — do NOT pick similar:\n"
+        for p in prohibitions[:8]:
+            avoid_context += f"  - {p}\n"
     if rejected_titles:
-        avoid_context += "\nPreviously REJECTED post titles — do not cover same stories:\n"
-        for rt in rejected_titles[:10]:
+        avoid_context += "\nREJECTED post titles — do not cover same stories:\n"
+        for rt in rejected_titles[:8]:
             avoid_context += f"  - {rt}\n"
+
+    prefer_context = ""
+    if priority_instructions:
+        prefer_context += "\nEDITOR PREFERENCES — try to pick content matching these:\n"
+        for pi in priority_instructions[:5]:
+            prefer_context += f"  - {pi}\n"
 
     try:
         prompt = (
@@ -498,7 +661,8 @@ async def pick_best_with_gemini(candidates: list, negative_constraints: list, re
             "startup ecosystem news, or venture market trends.\n"
             "Do NOT pick: consumer finance, personal taxes, sports, politics, geopolitics, "
             "general government policy, cryptocurrency, real estate.\n"
-            f"{avoid_context}\n"
+            f"{avoid_context}"
+            f"{prefer_context}\n"
             f"{articles_text}"
             "Respond with ONLY the number (e.g.: 3). Nothing else."
         )
@@ -512,7 +676,6 @@ async def pick_best_with_gemini(candidates: list, negative_constraints: list, re
 
 # ────────────────────────────────────────────────
 # GEMINI: SEMANTIC DUPLICATE CHECK
-# FIX #7: Also checks against rejected post titles, not just published ones
 # ────────────────────────────────────────────────
 async def is_semantic_duplicate(candidate: dict, recent_titles: list, rejected_titles: list) -> bool:
     all_titles = recent_titles + rejected_titles
@@ -538,6 +701,109 @@ async def is_semantic_duplicate(candidate: dict, recent_titles: list, rejected_t
         return False
 
 # ────────────────────────────────────────────────
+# POST QUALITY SCORER
+# Оценивает пост по 5 критериям (0-100).
+# Если score < 60 — перегенерируем (макс 2 попытки).
+# ────────────────────────────────────────────────
+def score_post_quality(post_text: str, region: str) -> dict:
+    import re
+    body      = post_text.replace(region, "").strip()
+    url_part  = body.split("http")[-1] if "http" in body else ""
+    body_text = body.replace(f"http{url_part}", "").strip()
+    issues    = []
+    score     = 100
+
+    # 1. Длина
+    length = len(body_text)
+    if length < 150:
+        issues.append(f"слишком коротко ({length} симв)")
+        score -= 25
+    elif length > 450:
+        issues.append(f"слишком длинно ({length} симв)")
+        score -= 15
+
+    # 2. Конкретные цифры
+    has_numbers = bool(re.search(
+        r'\d+[\.,]?\d*\s*(млн|млрд|тыс|%|M|B|K|\$|€|£)', body_text, re.IGNORECASE
+    ))
+    if not has_numbers:
+        issues.append("нет конкретных цифр или сумм")
+        score -= 20
+
+    # 3. Нет общих фраз
+    vague_phrases = [
+        "это важно для стартапов", "регион следит за трендами",
+        "аналитики отмечают", "эксперты считают", "как сообщается",
+        "по имеющимся данным", "по мнению экспертов",
+    ]
+    for phrase in vague_phrases:
+        if phrase in body_text.lower():
+            issues.append(f"общая фраза: «{phrase}»")
+            score -= 15
+            break
+
+    # 4. Страна указана
+    if region in ("CentralAsia", "World"):
+        country_words = [
+            "казахстан", "узбекистан", "кыргызстан", "таджикистан",
+            "сша", "китай", "индия", "европ", "великобритани",
+            "казахстана", "узбекистана", "кыргызстана",
+        ]
+        company_words = ["openai", "anthropic", "nvidia", "google", "microsoft", "amazon"]
+        if not any(w in body_text.lower() for w in country_words + company_words):
+            issues.append("не указана страна или компания")
+            score -= 20
+
+    # 5. Нет эмодзи
+    emoji_pattern = re.compile(
+        "[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF"
+        "\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF"
+        "\U00002702-\U000027B0\U000024C2-\U0001F251]+",
+        flags=re.UNICODE
+    )
+    if emoji_pattern.search(body_text):
+        issues.append("содержит эмодзи")
+        score -= 15
+
+    score  = max(0, min(100, score))
+    passed = score >= 60
+    print(f"Post quality: {score}/100 | {'OK' if passed else 'FAIL'} | {issues or 'no issues'}")
+    return {"score": score, "issues": issues, "passed": passed}
+
+
+# ────────────────────────────────────────────────
+# TRACKED ENTITIES
+# Читает таблицу tracked_entities из Supabase.
+# Если таблица не существует — возвращает пустой список.
+# ────────────────────────────────────────────────
+def get_tracked_entities() -> list:
+    try:
+        res = supabase.table("tracked_entities").select("name, region, keywords").execute()
+        entities = res.data or []
+        if entities:
+            print(f"Tracked entities: {[e['name'] for e in entities]}")
+        return entities
+    except Exception as e:
+        print(f"tracked_entities not available (skipping): {e}")
+        return []
+
+
+def build_entity_queries(entities: list) -> list:
+    """Поисковые запросы по конкретным компаниям. Priority -1 = выше всех."""
+    y       = datetime.utcnow().year
+    queries = []
+    for entity in entities[:10]:
+        name   = entity.get("name", "")
+        region = entity.get("region", "Kazakhstan")
+        queries.append({
+            "query":    f"{name} funding investment news {y}",
+            "region":   region,
+            "priority": -1,
+        })
+    return queries
+
+
+# ────────────────────────────────────────────────
 # TELEGRAM SEND
 # ────────────────────────────────────────────────
 async def send_to_channel(text: str, image_url: str, thread_id: str = None):
@@ -554,11 +820,7 @@ async def send_to_channel(text: str, image_url: str, thread_id: str = None):
                 **kwargs
             )
         else:
-            await bot.send_message(
-                text=text,
-                disable_web_page_preview=False,
-                **kwargs
-            )
+            await bot.send_message(text=text, disable_web_page_preview=False, **kwargs)
     except TelegramError as te:
         print(f"Telegram error: {te}")
         if image_url:
@@ -571,13 +833,30 @@ async def send_to_channel(text: str, image_url: str, thread_id: str = None):
 # ────────────────────────────────────────────────
 # NEWS POST LOGIC
 # ────────────────────────────────────────────────
-async def run_news(posted_count: int, approval_mode: bool, negative_rules: list):
+async def run_news(posted_count: int, approval_mode: bool, intents: dict):
     print("MODE: NEWS (08:00)")
+
+    prohibitions          = intents["prohibitions"]
+    region_boosts         = intents["region_boosts"]
+    stage_boost           = intents["stage_boost"]
+    priority_instructions = intents["priority_instructions"]
+
+    # Build active query list: tracked entities first, then seed boost, then standard
+    entities       = get_tracked_entities()
+    entity_queries = build_entity_queries(entities)
+
+    active_queries = list(SEARCH_QUERIES)
+    if stage_boost:
+        active_queries = SEED_QUERIES + active_queries
+        print(f"Stage boost active — added {len(SEED_QUERIES)} pre-seed/seed queries.")
+    if entity_queries:
+        active_queries = entity_queries + active_queries
+        print(f"Tracked entities — added {len(entity_queries)} company-specific queries.")
 
     all_candidates = []
 
     print("Searching via Tavily...")
-    for search in SEARCH_QUERIES:
+    for search in active_queries:
         results = tavily_search(search["query"], max_results=10)
         for r in results:
             if is_already_posted(r["url"]):
@@ -586,7 +865,7 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
             if is_already_pending(r["url"]):
                 print(f"Already pending approval: {r['url'][:60]}")
                 continue
-            if not is_vc_relevant(r["title"], r["snippet"], negative_rules):
+            if not is_vc_relevant(r["title"], r["snippet"], prohibitions):
                 continue
             all_candidates.append({
                 "title":    r["title"],
@@ -597,6 +876,7 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
                 "key":      r["url"],
             })
 
+    # Deduplicate by URL
     seen = set()
     unique = []
     for c in all_candidates:
@@ -612,6 +892,8 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
         await notify_recipients("Main Bot: сегодня не нашлось подходящих новостей.")
         return
 
+    # Apply priority boosts from feedback
+    all_candidates = apply_priority_boosts(all_candidates, intents)
     all_candidates.sort(key=lambda c: c["priority"])
 
     recent_titles   = get_recent_post_titles()
@@ -622,7 +904,9 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
     remaining = list(all_candidates)
 
     while remaining:
-        candidate = await pick_best_with_gemini(remaining, negative_rules, rejected_titles)
+        candidate = await pick_best_with_gemini(
+            remaining, prohibitions, rejected_titles, priority_instructions
+        )
         if not candidate:
             break
         if not await is_semantic_duplicate(candidate, recent_titles, rejected_titles):
@@ -634,7 +918,7 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
 
     if not best:
         print("All candidates are semantic duplicates of recent posts.")
-        await notify_recipients("Main Bot: все найденные новости — дубли недавних публикаций. Пост сегодня не выйдет.")
+        await notify_recipients("Main Bot: все найденные новости — дубли недавних публикаций.")
         return
 
     print(f"Selected [{best['region']}]: {best['title']}")
@@ -647,9 +931,9 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
     }.get(best["region"], "")
 
     constraint_context = ""
-    if negative_rules:
+    if prohibitions:
         constraint_context = "\nПредыдущие причины отклонений (не повторяй подобный контент):\n"
-        for rule in negative_rules[:8]:
+        for rule in prohibitions[:8]:
             constraint_context += f"  - {rule}\n"
 
     try:
@@ -675,12 +959,29 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
             "- Только факты из статьи\n"
             "- Длина: 200-350 символов\n"
         )
-        post_text = gemini_generate(prompt)
+        # Generate post with up to 2 retries if quality score is too low
+        post_text  = None
+        quality    = None
+        for attempt in range(3):
+            raw_text = gemini_generate(prompt)
+            if not raw_text.startswith(region_header):
+                raw_text = f"{region_header}\n\n{raw_text}"
+            candidate_text = f"{raw_text}\n\n{best['url']}"
+            quality = score_post_quality(candidate_text, region_header)
+            if quality["passed"]:
+                post_text = candidate_text
+                break
+            else:
+                print(f"Attempt {attempt+1} failed (score {quality['score']}): {quality['issues']} — retrying...")
+                if attempt < 2:
+                    # Add issues to prompt so next attempt avoids them
+                    issues_hint = "; ".join(quality["issues"])
+                    prompt += f"\n\nПредыдущая попытка провалила проверку качества: {issues_hint}. Исправь это."
 
-        if not post_text.startswith(region_header):
-            post_text = f"{region_header}\n\n{post_text}"
-
-        post_text = f"{post_text}\n\n{best['url']}"
+        if post_text is None:
+            # Use last attempt even if failed
+            post_text = candidate_text
+            print(f"All attempts failed quality check. Using best available (score: {quality['score']}).")
 
         image_url = None
         try:
@@ -690,7 +991,6 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
             img  = soup.find("meta", property="og:image")
             if img and img.get("content"):
                 image_url = img["content"]
-                print(f"Image from og:image: {image_url[:50]}...")
         except Exception as e:
             print(f"og:image failed: {e}")
 
@@ -702,7 +1002,7 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
                     search_terms.append("startup office")
                 if any(w in keywords for w in ["funding", "investment", "инвестиц", "раунд"]):
                     search_terms.append("business meeting")
-                if any(w in keywords for w in ["ai", "artificial intelligence", "ии"]):
+                if any(w in keywords for w in ["ai", "artificial intelligence"]):
                     search_terms.append("technology")
                 query = search_terms[0] if search_terms else "venture capital"
                 resp = requests.get(
@@ -712,7 +1012,6 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
                 )
                 if resp.status_code == 200:
                     image_url = resp.json()["urls"]["regular"]
-                    print(f"Image from Unsplash ({query}): {image_url[:50]}...")
             except Exception as e:
                 print(f"Unsplash fallback failed: {e}")
 
@@ -728,8 +1027,15 @@ async def run_news(posted_count: int, approval_mode: bool, negative_rules: list)
         if not pending_id:
             await notify_recipients("Не удалось сохранить пост для одобрения.")
             return
+        quality_line = ""
+        if quality:
+            score_icon = "OK" if quality["passed"] else "WARN"
+            quality_line = f"\nКачество: {quality['score']}/100 [{score_icon}]"
+            if quality["issues"]:
+                quality_line += f" | {', '.join(quality['issues'])}"
+
         preview = (
-            f"НОВОСТЬ НА ОДОБРЕНИЕ (#{posted_count + 1}/100)\n"
+            f"НОВОСТЬ НА ОДОБРЕНИЕ (#{posted_count + 1}/100){quality_line}\n"
             f"--------------------\n"
             f"{post_text}\n"
             f"--------------------\n"
@@ -829,7 +1135,6 @@ async def run_education(posted_count: int, approval_mode: bool):
 
         if not post_text.startswith("Обучение"):
             post_text = f"Обучение\n\n{post_text}"
-
         if use_activat and youtube_url and youtube_url not in post_text:
             post_text = f"{post_text}\n\nСмотреть урок: {youtube_url}"
 
@@ -840,7 +1145,7 @@ async def run_education(posted_count: int, approval_mode: bool):
         await notify_recipients(f"Groq error (обучение): {str(e)}")
         return
 
-    candidate = {"title": topic, "url": youtube_url, "region": "Education", "key": dedup_key}
+    candidate  = {"title": topic, "url": youtube_url, "region": "Education", "key": dedup_key}
     source_tag = f"Activat VC: {youtube_url}" if use_activat else "Global VC topic"
 
     if approval_mode:
@@ -873,11 +1178,12 @@ async def run_education(posted_count: int, approval_mode: bool):
 async def main():
     print(f"STARTING | {datetime.utcnow().isoformat()} UTC | TYPE: {POST_TYPE.upper()}")
 
-    # FIX: Expire stale pending posts first — this is what caused daily duplicates
     expired = expire_old_pending_posts()
     print(f"Cleaned up {expired} expired pending posts.")
 
-    negative_rules = fetch_negative_constraints()
+    # Load all constraints and parse their intent
+    raw_constraints = fetch_negative_constraints()
+    intents         = parse_feedback_intents(raw_constraints)
 
     posted_count  = get_posted_count()
     approval_mode = posted_count < 100
@@ -886,7 +1192,7 @@ async def main():
     if POST_TYPE == "education":
         await run_education(posted_count, approval_mode)
     else:
-        await run_news(posted_count, approval_mode, negative_rules)
+        await run_news(posted_count, approval_mode, intents)
 
 
 if __name__ == "__main__":
