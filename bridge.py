@@ -14,7 +14,6 @@ from tavily import TavilyClient
 # ────────────────────────────────────────────────
 GROQ_API_KEY                = os.getenv("GROQ_API_KEY")
 TELEGRAM_BOT_TOKEN          = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_FEEDBACK_BOT_TOKEN = os.getenv("TELEGRAM_FEEDBACK_BOT_TOKEN")
 TELEGRAM_CHAT_ID            = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_ADMIN_ID           = os.getenv("TELEGRAM_ADMIN_ID")
 TELEGRAM_FOUNDER_ID         = os.getenv("TELEGRAM_FOUNDER_ID")
@@ -40,9 +39,7 @@ if not TAVILY_API_KEY:
 groq_client  = Groq(api_key=GROQ_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 bot          = Bot(token=TELEGRAM_BOT_TOKEN)
-# feedback_bot отправляет сообщения на одобрение с inline-кнопками
-# Если TELEGRAM_FEEDBACK_BOT_TOKEN не задан — кнопки не появятся
-feedback_bot = Bot(token=TELEGRAM_FEEDBACK_BOT_TOKEN) if TELEGRAM_FEEDBACK_BOT_TOKEN else None
+# bot используется и для публикации и для сообщений на одобрение с кнопками
 tavily       = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
 # ────────────────────────────────────────────────
@@ -84,38 +81,25 @@ async def notify_recipients(message: str):
 
 async def notify_approval(pending_id: str, preview_text: str):
     """
-    Отправляет пост на одобрение с inline-кнопками через feedback_bot.
-    Если feedback_bot не настроен — fallback на обычный текст через main bot.
+    Отправляет пост на одобрение с inline-кнопками.
+    Кнопки обрабатывает feedback_bot.py (Render) — он слушает тот же TELEGRAM_BOT_TOKEN.
     """
     keyboard = make_approval_keyboard(pending_id)
 
-    async def _send_with_buttons(chat_id: str):
-        await feedback_bot.send_message(
-            chat_id=chat_id,
-            text=preview_text,
-            reply_markup=keyboard,
-        )
-
-    async def _send_plain(chat_id: str):
-        await bot.send_message(chat_id=chat_id, text=preview_text)
-
-    if feedback_bot:
-        # Отправляем через feedback_bot — кнопки будут работать
-        await _send_with_buttons(TELEGRAM_ADMIN_ID)
-        if TELEGRAM_FOUNDER_ID and TELEGRAM_FOUNDER_ID != TELEGRAM_ADMIN_ID:
-            try:
-                await _send_with_buttons(TELEGRAM_FOUNDER_ID)
-            except Exception as e:
-                print(f"Failed to notify founder with buttons: {e}")
-    else:
-        # Fallback без кнопок
-        print("Warning: TELEGRAM_FEEDBACK_BOT_TOKEN not set — sending without buttons")
-        await _send_plain(TELEGRAM_ADMIN_ID)
-        if TELEGRAM_FOUNDER_ID and TELEGRAM_FOUNDER_ID != TELEGRAM_ADMIN_ID:
-            try:
-                await _send_plain(TELEGRAM_FOUNDER_ID)
-            except Exception as e:
-                print(f"Failed to notify founder: {e}")
+    await bot.send_message(
+        chat_id=TELEGRAM_ADMIN_ID,
+        text=preview_text,
+        reply_markup=keyboard,
+    )
+    if TELEGRAM_FOUNDER_ID and TELEGRAM_FOUNDER_ID != TELEGRAM_ADMIN_ID:
+        try:
+            await bot.send_message(
+                chat_id=TELEGRAM_FOUNDER_ID,
+                text=preview_text,
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            print(f"Failed to notify founder: {e}")
 
 # ────────────────────────────────────────────────
 # SEARCH QUERIES BY REGION
