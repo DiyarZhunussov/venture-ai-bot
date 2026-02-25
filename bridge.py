@@ -5,23 +5,24 @@ import requests
 from datetime import datetime, timezone
 from supabase import create_client, Client
 from groq import Groq
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 from tavily import TavilyClient
 
 # ────────────────────────────────────────────────
 # ENVIRONMENT VARIABLES
 # ────────────────────────────────────────────────
-GROQ_API_KEY        = os.getenv("GROQ_API_KEY")
-TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID")
-TELEGRAM_ADMIN_ID   = os.getenv("TELEGRAM_ADMIN_ID")
-TELEGRAM_FOUNDER_ID = os.getenv("TELEGRAM_FOUNDER_ID")
-SUPABASE_URL        = os.getenv("SUPABASE_URL")
-SUPABASE_KEY        = os.getenv("SUPABASE_KEY")
-UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
-TAVILY_API_KEY      = os.getenv("TAVILY_API_KEY")
-POST_TYPE           = os.getenv("POST_TYPE", "news")
+GROQ_API_KEY                = os.getenv("GROQ_API_KEY")
+TELEGRAM_BOT_TOKEN          = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_FEEDBACK_BOT_TOKEN = os.getenv("TELEGRAM_FEEDBACK_BOT_TOKEN")
+TELEGRAM_CHAT_ID            = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_ADMIN_ID           = os.getenv("TELEGRAM_ADMIN_ID")
+TELEGRAM_FOUNDER_ID         = os.getenv("TELEGRAM_FOUNDER_ID")
+SUPABASE_URL                = os.getenv("SUPABASE_URL")
+SUPABASE_KEY                = os.getenv("SUPABASE_KEY")
+UNSPLASH_ACCESS_KEY         = os.getenv("UNSPLASH_ACCESS_KEY")
+TAVILY_API_KEY              = os.getenv("TAVILY_API_KEY")
+POST_TYPE                   = os.getenv("POST_TYPE", "news")
 
 NEWS_THREAD_ID      = os.getenv("TELEGRAM_NEWS_THREAD_ID")
 EDUCATION_THREAD_ID = os.getenv("TELEGRAM_EDUCATION_THREAD_ID")
@@ -36,10 +37,25 @@ if not TAVILY_API_KEY:
 # ────────────────────────────────────────────────
 # INITIALIZATION
 # ────────────────────────────────────────────────
-groq_client = Groq(api_key=GROQ_API_KEY)
+groq_client  = Groq(api_key=GROQ_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-bot      = Bot(token=TELEGRAM_BOT_TOKEN)
-tavily   = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
+bot          = Bot(token=TELEGRAM_BOT_TOKEN)
+# feedback_bot отправляет сообщения на одобрение с inline-кнопками
+# Если TELEGRAM_FEEDBACK_BOT_TOKEN не задан — кнопки не появятся
+feedback_bot = Bot(token=TELEGRAM_FEEDBACK_BOT_TOKEN) if TELEGRAM_FEEDBACK_BOT_TOKEN else None
+tavily       = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
+
+# ────────────────────────────────────────────────
+# INLINE KEYBOARD BUILDER
+# ────────────────────────────────────────────────
+def make_approval_keyboard(pending_id: str) -> InlineKeyboardMarkup:
+    """Кнопки Одобрить / Отклонить под сообщением на одобрение."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Одобрить",  callback_data=f"approve:{pending_id}"),
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_menu:{pending_id}"),
+        ]
+    ])
 
 # ────────────────────────────────────────────────
 # GROQ LLM WRAPPER
@@ -57,12 +73,49 @@ def gemini_generate(prompt: str) -> str:
 # NOTIFY RECIPIENTS
 # ────────────────────────────────────────────────
 async def notify_recipients(message: str):
+    """Обычное текстовое уведомление (для ошибок, статусов и т.д.)"""
     await bot.send_message(TELEGRAM_ADMIN_ID, message)
     if TELEGRAM_FOUNDER_ID and TELEGRAM_FOUNDER_ID != TELEGRAM_ADMIN_ID:
         try:
             await bot.send_message(TELEGRAM_FOUNDER_ID, message)
         except Exception as e:
             print(f"Failed to notify founder: {e}")
+
+
+async def notify_approval(pending_id: str, preview_text: str):
+    """
+    Отправляет пост на одобрение с inline-кнопками через feedback_bot.
+    Если feedback_bot не настроен — fallback на обычный текст через main bot.
+    """
+    keyboard = make_approval_keyboard(pending_id)
+
+    async def _send_with_buttons(chat_id: str):
+        await feedback_bot.send_message(
+            chat_id=chat_id,
+            text=preview_text,
+            reply_markup=keyboard,
+        )
+
+    async def _send_plain(chat_id: str):
+        await bot.send_message(chat_id=chat_id, text=preview_text)
+
+    if feedback_bot:
+        # Отправляем через feedback_bot — кнопки будут работать
+        await _send_with_buttons(TELEGRAM_ADMIN_ID)
+        if TELEGRAM_FOUNDER_ID and TELEGRAM_FOUNDER_ID != TELEGRAM_ADMIN_ID:
+            try:
+                await _send_with_buttons(TELEGRAM_FOUNDER_ID)
+            except Exception as e:
+                print(f"Failed to notify founder with buttons: {e}")
+    else:
+        # Fallback без кнопок
+        print("Warning: TELEGRAM_FEEDBACK_BOT_TOKEN not set — sending without buttons")
+        await _send_plain(TELEGRAM_ADMIN_ID)
+        if TELEGRAM_FOUNDER_ID and TELEGRAM_FOUNDER_ID != TELEGRAM_ADMIN_ID:
+            try:
+                await _send_plain(TELEGRAM_FOUNDER_ID)
+            except Exception as e:
+                print(f"Failed to notify founder: {e}")
 
 # ────────────────────────────────────────────────
 # SEARCH QUERIES BY REGION
@@ -1083,14 +1136,11 @@ async def run_news(posted_count: int, approval_mode: bool, intents: dict):
 
         preview = (
             f"НОВОСТЬ НА ОДОБРЕНИЕ (#{posted_count + 1}/100){quality_line}\n"
-            f"--------------------\n"
-            f"{post_text}\n"
-            f"--------------------\n"
-            f"Одобрить: /approve {pending_id}\n"
-            f"Отклонить: /reject {pending_id} причина"
+            f"{'─' * 28}\n"
+            f"{post_text}"
         )
-        await notify_recipients(preview)
-        print(f"Sent for approval. ID: {pending_id}")
+        await notify_approval(pending_id, preview)
+        print(f"Sent for approval with buttons. ID: {pending_id}")
     else:
         await send_to_channel(post_text, image_url, NEWS_THREAD_ID)
         add_to_posted(best["key"], "NEWS", 8, best["region"], title=best.get("title", ""))
@@ -1203,14 +1253,11 @@ async def run_education(posted_count: int, approval_mode: bool):
         preview = (
             f"ОБУЧЕНИЕ НА ОДОБРЕНИЕ (#{posted_count + 1}/100)\n"
             f"Источник: {source_tag}\n"
-            f"--------------------\n"
-            f"{post_text}\n"
-            f"--------------------\n"
-            f"Одобрить: /approve {pending_id}\n"
-            f"Отклонить: /reject {pending_id} причина"
+            f"{'─' * 28}\n"
+            f"{post_text}"
         )
-        await notify_recipients(preview)
-        print(f"Education sent for approval. ID: {pending_id}")
+        await notify_approval(pending_id, preview)
+        print(f"Education sent for approval with buttons. ID: {pending_id}")
     else:
         await send_to_channel(post_text, None, EDUCATION_THREAD_ID)
         add_to_posted(dedup_key, "EDUCATION", 8, "Education", title=topic)
