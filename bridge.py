@@ -237,18 +237,25 @@ PROHIBITION_MARKERS = [
     "не про", "не о ", "не об ",
 ]
 
-# Маппинг ключевых слов фидбэка → регион или тип контента для буста
+# Маппинг ключевых слов фидбэка → регион.
+# Используем корни слов (без окончаний) чтобы ловить все падежи русского языка:
+#   "центральная азия" / "центральной азии" / "центральную азию" → все поймаем по "центральн"+"азии|азия|азию"
+# Ключи — подстроки которые ищем в тексте (достаточно одного совпадения)
 REGION_BOOST_MAP = {
-    "центральная азия": "CentralAsia",
-    "центральноазиатск": "CentralAsia",
-    "центр азия": "CentralAsia",
+    # Центральная Азия — все падежные формы через корни
+    "центральн":    "CentralAsia",   # центральная/центральной/центральную азия/азии/азию
     "central asia": "CentralAsia",
-    "казахстан": "Kazakhstan",
-    "kazakhstan": "Kazakhstan",
-    "узбекистан": "CentralAsia",
-    "кыргызстан": "CentralAsia",
-    "таджикистан": "CentralAsia",
+    "centralasia":  "CentralAsia",
+    # Казахстан — все падежи
+    "казахстан":    "Kazakhstan",    # казахстан/казахстана/казахстане/казахстану
+    "kazakhstan":   "Kazakhstan",
+    # Остальные страны ЦА
+    "узбекистан":   "CentralAsia",
+    "кыргызстан":   "CentralAsia",
+    "таджикистан":  "CentralAsia",
     "туркменистан": "CentralAsia",
+    "ца ":          "CentralAsia",   # аббревиатура "ЦА"
+    " ца":          "CentralAsia",
 }
 
 STAGE_BOOST_KEYWORDS = [
@@ -777,11 +784,20 @@ def score_post_quality(post_text: str, region: str) -> dict:
 # Если таблица не существует — возвращает пустой список.
 # ────────────────────────────────────────────────
 def get_tracked_entities() -> list:
+    """
+    Читает таблицу tracked_entities из Supabase.
+    Реальные колонки: id, created_at, entity_name, entity_type, website
+    entity_type используется как регион: Kazakhstan / CentralAsia / World
+    """
     try:
-        res = supabase.table("tracked_entities").select("name, region, keywords").execute()
+        res = supabase.table("tracked_entities") \
+            .select("entity_name, entity_type, website") \
+            .execute()
         entities = res.data or []
         if entities:
-            print(f"Tracked entities: {[e['name'] for e in entities]}")
+            print(f"Tracked entities: {[e['entity_name'] for e in entities]}")
+        else:
+            print("Tracked entities table is empty.")
         return entities
     except Exception as e:
         print(f"tracked_entities not available (skipping): {e}")
@@ -793,8 +809,10 @@ def build_entity_queries(entities: list) -> list:
     y       = datetime.utcnow().year
     queries = []
     for entity in entities[:10]:
-        name   = entity.get("name", "")
-        region = entity.get("region", "Kazakhstan")
+        name   = entity.get("entity_name", "")
+        region = entity.get("entity_type", "Kazakhstan")
+        if not name:
+            continue
         queries.append({
             "query":    f"{name} funding investment news {y}",
             "region":   region,
