@@ -17,7 +17,6 @@ from telegram.ext import (
 # ────────────────────────────────────────────────
 # ENVIRONMENT VARIABLES
 # ────────────────────────────────────────────────
-TELEGRAM_FEEDBACK_BOT_TOKEN = os.getenv("TELEGRAM_FEEDBACK_BOT_TOKEN")
 TELEGRAM_BOT_TOKEN          = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_ADMIN_ID           = os.getenv("TELEGRAM_ADMIN_ID")
 TELEGRAM_FOUNDER_ID         = os.getenv("TELEGRAM_FOUNDER_ID")
@@ -27,8 +26,7 @@ SUPABASE_KEY                = os.getenv("SUPABASE_KEY")
 NEWS_THREAD_ID              = os.getenv("TELEGRAM_NEWS_THREAD_ID")
 EDUCATION_THREAD_ID         = os.getenv("TELEGRAM_EDUCATION_THREAD_ID")
 
-if not all([TELEGRAM_FEEDBACK_BOT_TOKEN, TELEGRAM_ADMIN_ID, SUPABASE_URL, SUPABASE_KEY,
-            TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_ID, SUPABASE_URL, SUPABASE_KEY, TELEGRAM_CHAT_ID]):
     print("Missing required environment variables for feedback bot.")
     sys.exit(1)
 
@@ -745,7 +743,7 @@ if __name__ == "__main__":
 
     port        = int(os.getenv("PORT", 10000))
     base_url    = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-    webhook_url = f"{base_url}/{TELEGRAM_FEEDBACK_BOT_TOKEN}"
+    webhook_url = f"{base_url}/webhook"
 
     print(f"ЗАПУСК FEEDBACK BOT (webhook mode)")
     print(f"Webhook URL: {webhook_url}")
@@ -755,7 +753,7 @@ if __name__ == "__main__":
 
     app = (
         ApplicationBuilder()
-        .token(TELEGRAM_FEEDBACK_BOT_TOKEN)
+        .token(TELEGRAM_BOT_TOKEN)
         .build()
     )
 
@@ -796,7 +794,7 @@ if __name__ == "__main__":
     app.run_webhook(
         listen="0.0.0.0",
         port=port,
-        url_path=TELEGRAM_FEEDBACK_BOT_TOKEN,
+        url_path="webhook",
         webhook_url=webhook_url,
         drop_pending_updates=True,
     )
