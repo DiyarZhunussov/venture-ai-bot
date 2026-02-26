@@ -598,10 +598,11 @@ def get_approved_examples(region: str = None, limit: int = 3) -> list:
         examples = []
 
         # Сначала ищем примеры того же региона
+        # Считаем и обычные approved И bulk_approved (обучающие посты из bulk_seed)
         if region:
             res = supabase.table("pending_posts") \
                 .select("post_text, region") \
-                .eq("status", "approved") \
+                .in_("status", ["approved", "bulk_approved"]) \
                 .eq("region", region) \
                 .order("created_at", desc=True) \
                 .limit(limit) \
@@ -619,7 +620,7 @@ def get_approved_examples(region: str = None, limit: int = 3) -> list:
             needed = limit - len(examples)
             res2 = supabase.table("pending_posts") \
                 .select("post_text, region") \
-                .eq("status", "approved") \
+                .in_("status", ["approved", "bulk_approved"]) \
                 .order("created_at", desc=True) \
                 .limit(limit * 3) \
                 .execute()
