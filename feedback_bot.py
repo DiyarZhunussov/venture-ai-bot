@@ -311,22 +311,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=make_approval_keyboard(pending_id),
         )
 
-    # ── BULK: одобрить пост ──
+    # ── BULK: одобрить пост (только для обучения, НЕ публикует в канал) ──
     elif data.startswith("bk_approve:"):
         pending_id = data.split(":", 1)[1]
         post = get_post_by_id(pending_id)
         if not post:
             await query.edit_message_text("Пост не найден.")
             return
-        supabase.table("pending_posts").update({"status": "approved"}).eq("id", pending_id).execute()
-        add_to_posted(post.get("url", pending_id), "NEWS", 8, post.get("region",""), title=post.get("title",""))
+        # Статус → bulk_approved (НЕ в posted_news — пост в канал не уходит)
+        # bulk_approved используется как few-shot примеры в bridge.py (get_approved_examples)
+        supabase.table("pending_posts") \
+            .update({"status": "bulk_approved"}) \
+            .eq("id", pending_id).execute()
         await save_post_metric(pending_id, post.get("post_text",""), post.get("region",""),
                                "approved", source_url=post.get("url"), post_type="bulk")
         remaining = supabase.table("pending_posts").select("id", count="exact").eq("status","bulk_pending").execute()
-        approved_total = supabase.table("posted_news").select("id", count="exact").execute()
+        total_approved = supabase.table("pending_posts").select("id", count="exact").eq("status","bulk_approved").execute()
         await query.edit_message_text(
-            f"✅ Одобрен.\n"
-            f"Опубликовано всего: {approved_total.count} | Осталось bulk: {remaining.count}"
+            f"✅ Одобрен для обучения ИИ (в канал не публикуется)\n"
+            f"Одобрено: {total_approved.count} | Осталось: {remaining.count}"
         )
 
     # ── BULK: меню причин отклонения ──
