@@ -328,9 +328,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remaining = supabase.table("pending_posts").select("id", count="exact").eq("status","bulk_pending").execute()
         total_approved = supabase.table("pending_posts").select("id", count="exact").eq("status","bulk_approved").execute()
         await query.edit_message_text(
-            f"✅ Одобрен для обучения ИИ (в канал не публикуется)\n"
+            f"✅ Одобрен.\n"
             f"Одобрено: {total_approved.count} | Осталось: {remaining.count}"
         )
+        # Автоматически шлём следующий пост
+        await _send_next_bulk_post(query.message.chat_id, context)
 
     # ── BULK: меню причин отклонения ──
     elif data.startswith("bk_reject_menu:"):
@@ -376,8 +378,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remaining = supabase.table("pending_posts").select("id", count="exact").eq("status","bulk_pending").execute()
         await query.edit_message_text(
             f"❌ Отклонён. Причина: «{reason_text}»\n"
-            f"Осталось bulk: {remaining.count}"
+            f"Осталось: {remaining.count}"
         )
+        # Автоматически шлём следующий пост
+        await _send_next_bulk_post(query.message.chat_id, context)
 
     # ── BULK: назад к кнопкам поста ──
     elif data.startswith("bk_back:"):
@@ -497,69 +501,92 @@ async def save_post_metric(pending_id: str, post_text: str, region: str,
 
 
 # ────────────────────────────────────────────────
-# /bulk — отправить ВСЕ bulk_pending посты по одному
+# /bulk — запускает сессию: шлёт первый пост
 # ────────────────────────────────────────────────
+async def _send_next_bulk_post(chat_id: int, context):
+    """
+    Загружает следующий bulk_pending пост и шлёт его в чат.
+    Вызывается после каждого фидбэка автоматически.
+    """
+    try:
+        res = supabase.table("pending_posts") \
+            .select("id, post_text, region") \
+            .eq("status", "bulk_pending") \
+            .order("created_at", desc=False) \
+            .limit(1) \
+            .execute()
+        posts = res.data or []
+    except Exception as e:
+        print(f"_send_next_bulk_post error: {e}")
+        return
+
+    if not posts:
+        # Все посты обработаны
+        total_res = supabase.table("pending_posts").select("id", count="exact").eq("status","bulk_approved").execute()
+        rej_res   = supabase.table("pending_posts").select("id", count="exact").eq("status","rejected").execute()
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"✅ Все посты обработаны!\n\n"
+                f"Одобрено для обучения: {total_res.count}\n"
+                f"Отклонено: {rej_res.count}\n\n"
+                f"ИИ будет использовать одобренные посты как примеры стиля.\n"
+                f"Запусти /metrics чтобы посмотреть аналитику."
+            )
+        )
+        return
+
+    post  = posts[0]
+    total = supabase.table("pending_posts").select("id", count="exact").eq("status","bulk_pending").execute().count or 0
+    done  = supabase.table("pending_posts").select("id", count="exact").in_("status",["bulk_approved","rejected"]).execute().count or 0
+
+    preview = (
+        f"[{done + 1}] [{post['region']}] | Осталось: {total}\n"
+        f"{'─'*30}\n"
+        f"{post['post_text'][:800]}"
+    )
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=preview,
+        reply_markup=make_bulk_post_keyboard(post["id"])
+    )
+
+
 async def bulk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /bulk — отправляет все bulk_pending посты по одному с кнопками индивидуального фидбэка.
-    Каждый пост: текст + [✅ Одобрить] [❌ Отклонить+причина] + [⭐1–5 оценка].
-    После 100 одобрений бот уходит в авто-режим.
+    /bulk — начинает сессию bulk-ревью.
+    Шлёт ОДИН пост. После фидбэка бот автоматически шлёт следующий.
+    Так продолжается пока не закончатся все посты.
     """
     if not is_authorized(update.effective_user.id):
         return
 
-    try:
-        res = supabase.table("pending_posts") \
-            .select("id, title, post_text, region, url") \
-            .eq("status", "bulk_pending") \
-            .order("created_at", desc=False) \
-            .execute()
-        posts = res.data or []
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка загрузки: {e}")
-        return
+    total = supabase.table("pending_posts").select("id", count="exact").eq("status","bulk_pending").execute().count or 0
+    done  = supabase.table("pending_posts").select("id", count="exact").in_("status",["bulk_approved","rejected"]).execute().count or 0
 
-    if not posts:
-        await update.message.reply_text(
-            "Нет постов для bulk-ревью.\n\n"
-            "Сначала запусти bulk_seed.py через GitHub Actions:\n"
-            "Actions → Run workflow → bulk_seed"
-        )
-        return
-
-    approved_count = supabase.table("posted_news").select("id", count="exact").execute().count or 0
-
-    await update.message.reply_text(
-        f"📋 Bulk ревью — {len(posts)} постов\n\n"
-        f"Уже опубликовано: {approved_count}/100\n\n"
-        f"Как давать фидбэк:\n"
-        f"• ✅ Одобрить — пост становится примером стиля для ИИ\n"
-        f"• ❌ Отклонить → выбери причину → сохранится как анти-кейс\n"
-        f"• ⭐1–5 — оценка качества (для метрик обучения)\n\n"
-        f"Отправляю все {len(posts)} постов..."
-    )
-
-    sent = 0
-    for i, post in enumerate(posts, 1):
-        preview = (
-            f"Пост {i}/{len(posts)} | [{post['region']}]\n"
-            f"{'─'*30}\n"
-            f"{post['post_text'][:800]}"
-        )
-        try:
+    if total == 0:
+        if done > 0:
             await update.message.reply_text(
-                preview,
-                reply_markup=make_bulk_post_keyboard(post["id"])
+                f"✅ Bulk-ревью уже завершён ({done} постов обработано).\n"
+                f"Запусти /metrics для аналитики."
             )
-            sent += 1
-        except Exception as e:
-            print(f"Error sending bulk post {i}: {e}")
-            continue
+        else:
+            await update.message.reply_text(
+                "Нет постов для bulk-ревью.\n\n"
+                "Сначала запусти bulk_seed.py через GitHub Actions:\n"
+                "Actions → Run workflow → bulk_seed"
+            )
+        return
 
     await update.message.reply_text(
-        f"✅ Отправлено {sent} постов.\n"
-        f"Дай фидбэк на каждый — после 100 одобрений бот уйдёт в авто-режим!"
+        f"📋 Bulk ревью — {total} постов осталось (обработано: {done})\n\n"
+        f"Как давать фидбэк:\n"
+        f"• ✅ Одобрить — станет примером стиля для ИИ (в канал НЕ публикуется)\n"
+        f"• ❌ Отклонить → причина → сохранится как анти-кейс\n"
+        f"• ⭐1–5 — оценка для метрик\n\n"
+        f"После каждого ответа автоматически придёт следующий пост. Поехали!"
     )
+    await _send_next_bulk_post(update.effective_chat.id, context)
 
 
 # ────────────────────────────────────────────────
@@ -589,10 +616,11 @@ async def handle_bulk_custom_reject(update: Update, context: ContextTypes.DEFAUL
                            source_url=post.get("url"), post_type="bulk")
     remaining = supabase.table("pending_posts").select("id", count="exact").eq("status","bulk_pending").execute()
     await update.message.reply_text(
-        f"❌ Отклонён. Причина сохранена: «{reason}»\n"
-        f"ID анти-кейса: {cid}\n"
-        f"Осталось bulk: {remaining.count}"
+        f"❌ Отклонён. Причина: «{reason}» (ID: {cid})\n"
+        f"Осталось: {remaining.count}"
     )
+    # Автоматически шлём следующий пост
+    await _send_next_bulk_post(update.effective_chat.id, context)
     return True
 
 
@@ -1726,62 +1754,7 @@ async def _bulk_do_reject(pending_id: str, reason: str) -> bool:
         return False
 
 
-async def bulk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /bulk — отправляет ВСЕ bulk_pending посты по одному в Telegram.
-    Каждый пост: текст + кнопки [✅ Одобрить] [❌ Отклонить] + рейтинг ⭐1-5.
-    После 100 фидбэков бот уходит в авто-режим.
-    """
-    if not is_authorized(update.effective_user.id):
-        return
 
-    try:
-        res = supabase.table("pending_posts") \
-            .select("id, title, post_text, region, url") \
-            .eq("status", "bulk_pending") \
-            .order("created_at", desc=False) \
-            .execute()
-        posts = res.data or []
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка загрузки: {e}")
-        return
-
-    if not posts:
-        await update.message.reply_text(
-            "Нет постов для bulk-ревью.\n"
-            "Сначала запусти bulk_seed.py через GitHub Actions (workflow_dispatch)."
-        )
-        return
-
-    await update.message.reply_text(
-        f"📋 Bulk ревью — {len(posts)} постов\n\n"
-        f"Каждый пост придёт отдельно.\n"
-        f"Дай фидбэк на каждый:\n"
-        f"• ✅ Одобрить — хороший стиль, станет примером для ИИ\n"
-        f"• ❌ Отклонить + причина — ИИ будет избегать таких постов\n"
-        f"• ⭐1-5 — оценка качества для метрик\n\n"
-        f"После 100 одобрений бот уходит в авто-режим. Начинаем!"
-    )
-
-    sent = 0
-    for post in posts:
-        preview = (
-            f"[{sent+1}/{len(posts)}] [{post['region']}]\n"
-            f"{'─'*28}\n"
-            f"{post['post_text'][:700]}"
-        )
-        try:
-            await update.message.reply_text(
-                preview,
-                reply_markup=_make_bulk_post_keyboard(post["id"])
-            )
-            sent += 1
-        except Exception as e:
-            print(f"Error sending bulk post {post['id']}: {e}")
-
-    await update.message.reply_text(
-        f"✅ Отправлено {sent} постов. Дай фидбэк на каждый!"
-    )
 
 
 # ────────────────────────────────────────────────
