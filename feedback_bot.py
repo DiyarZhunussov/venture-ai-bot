@@ -88,6 +88,39 @@ def get_post_by_id(pending_id: str):
     except:
         return None
 
+
+def set_user_state(user_id: int, key: str, value: str):
+    """Сохраняет состояние пользователя в Supabase (персистентно между webhook вызовами)."""
+    state_key = f"{user_id}:{key}"
+    try:
+        existing = supabase.table("bot_state").select("id").eq("state_key", state_key).execute()
+        if existing.data:
+            supabase.table("bot_state").update({"state_value": value}).eq("state_key", state_key).execute()
+        else:
+            supabase.table("bot_state").insert({"state_key": state_key, "state_value": value}).execute()
+    except Exception as e:
+        print(f"set_user_state error: {e}")
+
+
+def get_user_state(user_id: int, key: str) -> str:
+    """Читает состояние пользователя из Supabase."""
+    state_key = f"{user_id}:{key}"
+    try:
+        res = supabase.table("bot_state").select("state_value").eq("state_key", state_key).execute()
+        return res.data[0]["state_value"] if res.data else None
+    except Exception as e:
+        print(f"get_user_state error: {e}")
+        return None
+
+
+def clear_user_state(user_id: int, key: str):
+    """Удаляет состояние пользователя из Supabase."""
+    state_key = f"{user_id}:{key}"
+    try:
+        supabase.table("bot_state").delete().eq("state_key", state_key).execute()
+    except Exception as e:
+        print(f"clear_user_state error: {e}")
+
 # ────────────────────────────────────────────────
 # PUBLISH TO CHANNEL
 # ────────────────────────────────────────────────
@@ -264,7 +297,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if reason_code == "custom":
             # Просим написать причину текстом
-            context.user_data["awaiting_reject_reason"] = pending_id
+            set_user_state(query.from_user.id, "awaiting_reject_reason", pending_id)
             await query.edit_message_text(
                 "Напиши причину отклонения одним сообщением.\n"
                 "Бот запомнит её как анти-кейс."
@@ -363,7 +396,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if reason_code == "custom":
-            context.user_data["awaiting_bulk_reject"] = pending_id
+            set_user_state(query.from_user.id, "awaiting_bulk_reject", pending_id)
             await query.edit_message_text(
                 "Напиши причину отклонения одним сообщением.\n"
                 "Она сохранится как анти-кейс."
@@ -609,12 +642,13 @@ async def handle_bulk_custom_reject(update: Update, context: ContextTypes.DEFAUL
     Вызывается из handle_custom_reject_reason.
     Возвращает True если обработал, False если это не bulk отклонение.
     """
-    pending_id = context.user_data.get("awaiting_bulk_reject")
+    user_id    = update.effective_user.id
+    pending_id = get_user_state(user_id, "awaiting_bulk_reject")
     if not pending_id:
         return False
 
     reason = update.message.text.strip()
-    del context.user_data["awaiting_bulk_reject"]
+    clear_user_state(user_id, "awaiting_bulk_reject")
 
     post = get_post_by_id(pending_id)
     if not post:
@@ -884,7 +918,8 @@ async def handle_custom_reject_reason(update: Update, context: ContextTypes.DEFA
     if await handle_bulk_custom_reject(update, context):
         return
 
-    pending_id = context.user_data.get("awaiting_reject_reason")
+    user_id    = update.effective_user.id
+    pending_id = get_user_state(user_id, "awaiting_reject_reason")
     if not pending_id:
         # Это обычный анти-кейс (не привязан к посту)
         await add_feedback(update, context)
@@ -893,7 +928,7 @@ async def handle_custom_reject_reason(update: Update, context: ContextTypes.DEFA
     reason        = update.message.text.strip()
     rejecter_name = update.effective_user.first_name or "Пользователь"
 
-    del context.user_data["awaiting_reject_reason"]
+    clear_user_state(user_id, "awaiting_reject_reason")
 
     post = get_post_by_id(pending_id)
     if post and post["status"] == "pending":
@@ -1347,7 +1382,7 @@ async def handle_custom_reject_reason(update: Update, context: ContextTypes.DEFA
     if not is_authorized(update.effective_user.id):
         return
 
-    pending_id = context.user_data.get("awaiting_reject_reason")
+    pending_id = get_user_state(update.effective_user.id, "awaiting_reject_reason")
     if not pending_id:
         # Это обычный анти-кейс (не привязан к посту)
         await add_feedback(update, context)
@@ -1356,7 +1391,7 @@ async def handle_custom_reject_reason(update: Update, context: ContextTypes.DEFA
     reason        = update.message.text.strip()
     rejecter_name = update.effective_user.first_name or "Пользователь"
 
-    del context.user_data["awaiting_reject_reason"]
+    clear_user_state(update.effective_user.id, "awaiting_reject_reason")
 
     post = get_post_by_id(pending_id)
     if post and post["status"] == "pending":
