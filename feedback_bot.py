@@ -65,9 +65,17 @@ def add_to_posted(url_or_text: str, news_type: str, score: int, source_type: str
         except Exception as e2:
             print(f"Failed to save to posted_news: {e2}")
 
-def add_negative_constraint(feedback: str):
+def add_negative_constraint(feedback: str, post_content: str = None):
+    """
+    Сохраняет анти-кейс.
+    feedback      — причина отклонения (текст)
+    post_content  — контент отклонённого поста (чтобы ИИ видел пример что не публиковать)
+    """
     try:
-        res = supabase.table("negative_constraints").insert({"feedback": feedback}).execute()
+        payload = {"feedback": feedback}
+        if post_content:
+            payload["post_content"] = post_content[:1500]
+        res = supabase.table("negative_constraints").insert(payload).execute()
         return res.data[0]["id"]
     except Exception as e:
         print(f"Failed to add negative constraint: {e}")
@@ -327,12 +335,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                "approved", source_url=post.get("url"), post_type="bulk")
         remaining = supabase.table("pending_posts").select("id", count="exact").eq("status","bulk_pending").execute()
         total_approved = supabase.table("pending_posts").select("id", count="exact").eq("status","bulk_approved").execute()
+        # Сначала просим оценку — после неё придёт следующий пост
         await query.edit_message_text(
-            f"✅ Одобрен.\n"
-            f"Одобрено: {total_approved.count} | Осталось: {remaining.count}"
+            f"✅ Одобрен (#{total_approved.count}, осталось: {remaining.count})\n\n"
+            f"Оцени качество поста от 1 до 5:",
+            reply_markup=make_bulk_rating_keyboard(pending_id)
         )
-        # Автоматически шлём следующий пост
-        await _send_next_bulk_post(query.message.chat_id, context)
 
     # ── BULK: меню причин отклонения ──
     elif data.startswith("bk_reject_menu:"):
@@ -371,17 +379,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         reason_text = reason_labels.get(reason_code, reason_code)
         supabase.table("pending_posts").update({"status": "rejected"}).eq("id", pending_id).execute()
-        add_negative_constraint(reason_text)
+        # Сохраняем анти-кейс С контентом — ИИ видит и причину и пример плохого поста
+        add_negative_constraint(reason_text, post_content=post.get("post_text",""))
         await save_post_metric(pending_id, post.get("post_text",""), post.get("region",""),
                                "rejected", reject_reason=reason_text,
                                source_url=post.get("url"), post_type="bulk")
         remaining = supabase.table("pending_posts").select("id", count="exact").eq("status","bulk_pending").execute()
+        # Сначала просим оценку — после неё придёт следующий пост
         await query.edit_message_text(
-            f"❌ Отклонён. Причина: «{reason_text}»\n"
-            f"Осталось: {remaining.count}"
+            f"❌ Отклонён: «{reason_text}» (осталось: {remaining.count})\n\n"
+            f"Оцени качество поста от 1 до 5:",
+            reply_markup=make_bulk_rating_keyboard(pending_id)
         )
-        # Автоматически шлём следующий пост
-        await _send_next_bulk_post(query.message.chat_id, context)
 
     # ── BULK: назад к кнопкам поста ──
     elif data.startswith("bk_back:"):
@@ -395,7 +404,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=make_bulk_post_keyboard(pending_id)
         )
 
-    # ── BULK: оценка 1-5 ──
+    # ── BULK: оценка 1-5 → после неё шлём следующий пост ──
     elif data.startswith("bk_rate:"):
         _, pending_id, rating_str = data.split(":", 2)
         rating = int(rating_str)
@@ -403,7 +412,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not post:
             await query.answer("Пост не найден.", show_alert=True)
             return
-        # Обновляем существующую метрику или создаём новую
         try:
             existing = supabase.table("post_metrics") \
                 .select("id").eq("pending_id", pending_id).execute()
@@ -421,27 +429,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"Rating save error: {e}")
         stars = "⭐" * rating
-        await query.answer(f"Оценка {stars} сохранена!", show_alert=False)
+        await query.edit_message_text(f"Оценка {stars} сохранена. Загружаю следующий...")
+        # Только теперь шлём следующий пост
+        await _send_next_bulk_post(query.message.chat_id, context)
 
 
 # ────────────────────────────────────────────────
 # BULK: keyboard builders
 # ────────────────────────────────────────────────
 def make_bulk_post_keyboard(pending_id: str) -> InlineKeyboardMarkup:
-    """Кнопки под каждым bulk-постом: одобрить, отклонить, оценка."""
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Одобрить",  callback_data=f"bk_approve:{pending_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"bk_reject_menu:{pending_id}"),
-        ],
-        [
-            InlineKeyboardButton("⭐1", callback_data=f"bk_rate:{pending_id}:1"),
-            InlineKeyboardButton("⭐2", callback_data=f"bk_rate:{pending_id}:2"),
-            InlineKeyboardButton("⭐3", callback_data=f"bk_rate:{pending_id}:3"),
-            InlineKeyboardButton("⭐4", callback_data=f"bk_rate:{pending_id}:4"),
-            InlineKeyboardButton("⭐5", callback_data=f"bk_rate:{pending_id}:5"),
-        ],
-    ])
+    """Кнопки под каждым bulk-постом: одобрить или отклонить."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Одобрить",  callback_data=f"bk_approve:{pending_id}"),
+        InlineKeyboardButton("❌ Отклонить", callback_data=f"bk_reject_menu:{pending_id}"),
+    ]])
+
+
+def make_bulk_rating_keyboard(pending_id: str) -> InlineKeyboardMarkup:
+    """Кнопки оценки качества — показываются ПОСЛЕ решения одобрить/отклонить."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⭐1", callback_data=f"bk_rate:{pending_id}:1"),
+        InlineKeyboardButton("⭐2", callback_data=f"bk_rate:{pending_id}:2"),
+        InlineKeyboardButton("⭐3", callback_data=f"bk_rate:{pending_id}:3"),
+        InlineKeyboardButton("⭐4", callback_data=f"bk_rate:{pending_id}:4"),
+        InlineKeyboardButton("⭐5", callback_data=f"bk_rate:{pending_id}:5"),
+    ]])
 
 
 def make_bulk_reject_keyboard(pending_id: str) -> InlineKeyboardMarkup:
@@ -610,17 +622,18 @@ async def handle_bulk_custom_reject(update: Update, context: ContextTypes.DEFAUL
         return True
 
     supabase.table("pending_posts").update({"status": "rejected"}).eq("id", pending_id).execute()
-    cid = add_negative_constraint(reason)
+    # Сохраняем анти-кейс С контентом поста
+    cid = add_negative_constraint(reason, post_content=post.get("post_text",""))
     await save_post_metric(pending_id, post.get("post_text",""), post.get("region",""),
                            "rejected", reject_reason=reason,
                            source_url=post.get("url"), post_type="bulk")
     remaining = supabase.table("pending_posts").select("id", count="exact").eq("status","bulk_pending").execute()
+    # Просим оценку перед следующим постом
     await update.message.reply_text(
-        f"❌ Отклонён. Причина: «{reason}» (ID: {cid})\n"
-        f"Осталось: {remaining.count}"
+        f"❌ Отклонён: «{reason}» (осталось: {remaining.count})\n\n"
+        f"Оцени качество поста от 1 до 5:",
+        reply_markup=make_bulk_rating_keyboard(pending_id)
     )
-    # Автоматически шлём следующий пост
-    await _send_next_bulk_post(update.effective_chat.id, context)
     return True
 
 
@@ -713,28 +726,38 @@ async def metrics_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         posted_total   = supabase.table("posted_news").select("id", count="exact").execute().count or 0
         mode = "Одобрение" if posted_total < 100 else "Авто ✅"
 
-        # ── ФОРМАТИРОВАНИЕ ────────────────────────────────
+        # ── ФОРМАТИРОВАНИЕ с объяснением каждой метрики ──
         lines = [
             "📊 МЕТРИКИ ОБУЧЕНИЯ ИИ",
             "━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
             "1️⃣ КАЧЕСТВО ПОСТОВ",
-            f"  Одобрено с первого раза: {approval_rate}%",
+            f"  Одобрено: {approval_rate}%",
+            "  ↳ Сколько постов прошло с первого раза без правок.",
             f"  Отклонено: {reject_rate}%",
             f"  Из-за «общих фраз»: {pct_generic}%",
-            f"  Средняя длина поста: {avg_len} символов",
+            "  ↳ Посты без конкретных фактов — «эксперты отмечают» и т.п.",
+            f"  Средняя длина: {avg_len} симв.",
+            "  ↳ Норма 200–350. Если меньше — пост слишком короткий.",
             f"  С конкретными числами: {pct_numbers}%",
-            f"  Средняя оценка фаундера: {avg_rating}/5",
+            "  ↳ Хороший пост содержит цифры ($, млн, %). Чем выше — тем лучше.",
+            f"  Средняя оценка: {avg_rating}/5",
+            "  ↳ Твоя личная оценка качества по шкале 1–5.",
             "",
             "2️⃣ ГАЛЛЮЦИНАЦИИ",
-            f"  С общими фразами (без фактов): {pct_vague}%",
+            f"  С общими фразами: {pct_vague}%",
+            "  ↳ % постов с фразами типа «по мнению аналитиков» — признак выдумки.",
             f"  С низкой оценкой ≤2⭐: {pct_low}%",
+            "  ↳ Посты которые ты оценил 1–2 — вероятно содержат ошибки или выдумку.",
             "",
             "3️⃣ ОБУЧЕНИЕ ИИ-АГЕНТА",
             f"  Тренд одобрений: {trend}",
+            "  ↳ Сравнение первых и последних постов — растёт ли качество.",
             f"  Ранние посты одобрено: {early_rate}%",
             f"  Поздние посты одобрено: {late_rate}%",
-            f"  Накоплено анти-кейсов: {nc_total}",
+            "  ↳ Если поздние > ранних — ИИ реально учится на твоих фидбэках.",
+            f"  Анти-кейсов накоплено: {nc_total}",
+            "  ↳ Сколько правил «не публиковать» ИИ уже усвоил.",
         ]
 
         if reason_counts:
@@ -746,14 +769,21 @@ async def metrics_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "",
             "4️⃣ ПАМЯТЬ И ОБУЧАЕМОСТЬ",
             f"  Повторяющиеся ошибки: {repeat_rate}%",
+            "  ↳ Как часто ИИ повторяет уже запрещённые типы контента. Норма <20%.",
             f"  Посты без нарушений: {pct_clean}%",
+            "  ↳ Одобренные + с цифрами + без общих фраз. Норма >60%.",
             f"  Обработано постов: {total}",
             "",
             "5️⃣ СИСТЕМНЫЕ",
             f"  Режим: {mode}",
+            "  ↳ До 100 одобренных — запрашивает ревью. После — публикует сам.",
             f"  Опубликовано: {posted_total}/100",
             f"  Осталось bulk-постов: {bulk_remaining}",
-            f"  Всего метрик в БД: {total}",
+            f"  Метрик в БД: {total}",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "ℹ️ Сброс данных для нового тестирования:",
+            "Запусти reset_for_demo.sql в Supabase → SQL Editor",
         ]
 
         await update.message.reply_text("\n".join(lines))
