@@ -504,6 +504,7 @@ def save_pending_post(candidate: dict, post_text: str, image_url) -> str:
         return None
 
 def fetch_negative_constraints() -> list:
+    """Возвращает список строк feedback (для фильтрации)."""
     try:
         res = supabase.table("negative_constraints").select("feedback, created_at").execute()
         constraints = [row["feedback"].lower() for row in res.data]
@@ -517,6 +518,33 @@ def fetch_negative_constraints() -> list:
         return constraints
     except Exception as e:
         print(f"Error loading negative constraints: {e}")
+        return []
+
+
+def fetch_rejected_examples(limit: int = 5) -> list:
+    """
+    Загружает примеры отклонённых постов с контентом из negative_constraints.
+    Используется в промпте как антипримеры — ИИ видит что НЕ надо публиковать.
+    """
+    try:
+        res = supabase.table("negative_constraints") \
+            .select("feedback, post_content") \
+            .not_.is_("post_content", "null") \
+            .order("created_at", desc=True) \
+            .limit(limit) \
+            .execute()
+        examples = []
+        for row in res.data or []:
+            if row.get("post_content"):
+                examples.append({
+                    "reason":  row["feedback"],
+                    "content": row["post_content"][:400],
+                })
+        if examples:
+            print(f"Rejected examples loaded: {len(examples)} (for anti-few-shot)")
+        return examples
+    except Exception as e:
+        print(f"Error loading rejected examples: {e}")
         return []
 
 def get_recent_post_titles(limit: int = 30) -> list:
@@ -1272,25 +1300,41 @@ async def run_news(posted_count: int, approval_mode: bool, intents: dict):
             constraint_context += f"  - {rule}\n"
 
     # Загружаем одобренные посты как few-shot примеры стиля
-    few_shot_examples = get_approved_examples(region=best["region"], limit=3)
+    few_shot_examples  = get_approved_examples(region=best["region"], limit=3)
+    # Загружаем отклонённые посты как антипримеры — ИИ видит что НЕ публиковать
+    rejected_examples  = fetch_rejected_examples(limit=4)
 
     try:
-        # Формируем блок с примерами (только если они есть)
+        # ── Блок одобренных примеров ──
         examples_block = ""
         if few_shot_examples:
             examples_block = (
-                "\nПРИМЕРЫ ОДОБРЕННЫХ ПОСТОВ (учись СТИЛЮ, НЕ фактам):\n"
-                "Изучи длину, тон, структуру этих постов. "
-                "Факты для нового поста бери ТОЛЬКО из раздела Содержание ниже.\n"
+                "\nПРИМЕРЫ ОДОБРЕННЫХ ПОСТОВ — учись СТИЛЮ (длина, тон, структура):\n"
+                "Факты для нового поста бери ТОЛЬКО из раздела ИСТОЧНИК ниже.\n"
             )
             for i, ex in enumerate(few_shot_examples, 1):
-                examples_block += f"\n--- Пример {i} ---\n{ex}\n"
-            examples_block += "--- Конец примеров ---\n"
+                examples_block += f"\n[Пример {i}]\n{ex}\n"
+            examples_block += "\n"
+
+        # ── Блок отклонённых антипримеров ──
+        rejected_block = ""
+        if rejected_examples:
+            rejected_block = "\nПРИМЕРЫ ОТКЛОНЁННЫХ ПОСТОВ — НИКОГДА не пиши так:\n"
+            for i, ex in enumerate(rejected_examples, 1):
+                rejected_block += (
+                    f"\n[Антипример {i}] Причина отклонения: {ex['reason']}\n"
+                    f"Контент: {ex['content']}\n"
+                )
+            rejected_block += (
+                "\nЭти посты отклонил редактор. Не повторяй их стиль, структуру "
+                "и причины отклонения в новом посте.\n"
+            )
 
         prompt = (
             "Ты редактор Telegram-канала о венчурном капитале в Центральной Азии.\n"
             "Напиши новостной пост на РУССКОМ языке строго по этой статье.\n"
-            f"{examples_block}\n"
+            f"{examples_block}"
+            f"{rejected_block}"
             "ИСТОЧНИК (используй ТОЛЬКО эти факты, не добавляй ничего от себя):\n"
             f"Заголовок: {best['title']}\n"
             f"Содержание: {best['snippet']}\n"
