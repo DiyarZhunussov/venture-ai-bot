@@ -86,7 +86,7 @@ def make_approval_keyboard(pending_id: str) -> InlineKeyboardMarkup:
 # ────────────────────────────────────────────────
 def gemini_generate(prompt: str) -> str:
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="meta-llama/llama-4-maverick-17b-128e-instruct",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=1024,
         temperature=0.7,
