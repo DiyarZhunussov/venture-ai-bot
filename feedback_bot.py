@@ -89,9 +89,15 @@ def get_post_by_id(pending_id: str):
         return None
 
 
+# In-memory fallback на случай если bot_state таблица ещё не создана
+_STATE_MEMORY: dict = {}
+
+
 def set_user_state(user_id: int, key: str, value: str):
-    """Сохраняет состояние пользователя в Supabase (персистентно между webhook вызовами)."""
+    """Сохраняет состояние в Supabase + in-memory fallback."""
     state_key = f"{user_id}:{key}"
+    # Всегда пишем в память — гарантированный fallback
+    _STATE_MEMORY[state_key] = value
     try:
         existing = supabase.table("bot_state").select("id").eq("state_key", state_key).execute()
         if existing.data:
@@ -99,27 +105,44 @@ def set_user_state(user_id: int, key: str, value: str):
         else:
             supabase.table("bot_state").insert({"state_key": state_key, "state_value": value}).execute()
     except Exception as e:
-        print(f"set_user_state error: {e}")
+        print(f"set_user_state DB error (using memory): {e}")
 
 
 def get_user_state(user_id: int, key: str) -> str:
-    """Читает состояние пользователя из Supabase."""
+    """Читает состояние из Supabase, fallback на in-memory."""
     state_key = f"{user_id}:{key}"
     try:
         res = supabase.table("bot_state").select("state_value").eq("state_key", state_key).execute()
-        return res.data[0]["state_value"] if res.data else None
+        if res.data:
+            val = res.data[0]["state_value"]
+            _STATE_MEMORY[state_key] = val  # синхронизируем память
+            return val
     except Exception as e:
-        print(f"get_user_state error: {e}")
-        return None
+        print(f"get_user_state DB error (using memory): {e}")
+    # Fallback: читаем из памяти
+    return _STATE_MEMORY.get(state_key)
 
 
 def clear_user_state(user_id: int, key: str):
-    """Удаляет состояние пользователя из Supabase."""
+    """Удаляет состояние из Supabase и памяти."""
     state_key = f"{user_id}:{key}"
+    _STATE_MEMORY.pop(state_key, None)
     try:
         supabase.table("bot_state").delete().eq("state_key", state_key).execute()
     except Exception as e:
-        print(f"clear_user_state error: {e}")
+        print(f"clear_user_state DB error: {e}")
+
+
+def ensure_bot_state_table():
+    """Создаёт таблицу bot_state если не существует. Вызывается при старте."""
+    try:
+        supabase.table("bot_state").select("id").limit(1).execute()
+    except Exception:
+        try:
+            # Таблица не существует — пробуем создать через прямой запрос
+            print("bot_state table missing — please run add_metrics_table.sql in Supabase")
+        except Exception as e:
+            print(f"ensure_bot_state_table error: {e}")
 
 # ────────────────────────────────────────────────
 # PUBLISH TO CHANNEL
@@ -1840,6 +1863,8 @@ if __name__ == "__main__":
     print(f"Port: {port}")
     if FOUNDER_ID:
         print(f"Founder ID: {FOUNDER_ID}")
+    ensure_bot_state_table()
+    print("bot_state table: OK")
 
     app = (
         ApplicationBuilder()
