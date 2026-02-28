@@ -23,25 +23,47 @@ from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 from groq import Groq
 from tavily import TavilyClient
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
 
 # ────────────────────────────────────────────────
 # ENV
 # ────────────────────────────────────────────────
-GROQ_API_KEY       = os.getenv("GROQ_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_ADMIN_ID  = os.getenv("TELEGRAM_ADMIN_ID")
+GROQ_API_KEY        = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY")
+TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_ADMIN_ID   = os.getenv("TELEGRAM_ADMIN_ID")
 TELEGRAM_FOUNDER_ID = os.getenv("TELEGRAM_FOUNDER_ID")
-SUPABASE_URL       = os.getenv("SUPABASE_URL")
-SUPABASE_KEY       = os.getenv("SUPABASE_KEY")
-TAVILY_API_KEY     = os.getenv("TAVILY_API_KEY")
+SUPABASE_URL        = os.getenv("SUPABASE_URL")
+SUPABASE_KEY        = os.getenv("SUPABASE_KEY")
+TAVILY_API_KEY      = os.getenv("TAVILY_API_KEY")
 
-if not all([GROQ_API_KEY, TELEGRAM_BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, TAVILY_API_KEY]):
+if not all([TELEGRAM_BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, TAVILY_API_KEY]):
     print("Missing required environment variables.")
     sys.exit(1)
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+if not GROQ_API_KEY and not GEMINI_API_KEY:
+    print("Need either GROQ_API_KEY or GEMINI_API_KEY")
+    sys.exit(1)
+
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 tavily = TavilyClient(api_key=TAVILY_API_KEY)
+
+# Инициализируем Gemini если доступен
+gemini_model = None
+if GEMINI_AVAILABLE and GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+    print("Generator: Gemini 1.5 Flash (основной)")
+elif GROQ_API_KEY:
+    print("Generator: Groq LLaMA (основной)")
+else:
+    print("ERROR: нет генератора")
+    sys.exit(1)
 
 TARGET_COUNT = 100   # сколько постов сгенерировать
 SEARCH_DAYS  = 90    # смотрим на 90 дней назад
@@ -138,6 +160,49 @@ def is_already_in_db(url: str) -> bool:
         return False
 
 
+def _call_llm(prompt: str) -> str:
+    """Gemini первым (быстро, без лимитов), Groq как fallback."""
+    # Пробуем Gemini
+    if gemini_model:
+        try:
+            resp = gemini_model.generate_content(prompt)
+            return resp.text.strip()
+        except Exception as e:
+            print(f"  Gemini error: {e} — fallback to Groq")
+
+    # Fallback: Groq
+    if groq_client:
+        try:
+            resp = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=400,
+                temperature=0.6,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            err = str(e)
+            if "rate_limit_exceeded" in err or "429" in err:
+                import re
+                wait = re.search(r"try again in (\d+)m", err)
+                wait_sec = int(wait.group(1)) * 60 + 30 if wait else 180
+                print(f"  Groq rate limit — жду {wait_sec}s...")
+                time.sleep(wait_sec)
+                try:
+                    resp2 = groq_client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=400,
+                        temperature=0.6,
+                    )
+                    return resp2.choices[0].message.content.strip()
+                except Exception as e2:
+                    print(f"  Groq retry failed: {e2}")
+            else:
+                print(f"  Groq error: {e}")
+    raise RuntimeError("Нет доступного генератора")
+
+
 def generate_post(title: str, snippet: str, url: str, region: str) -> str:
     region_header = REGION_HEADER.get(region, region)
     region_hint = {
@@ -164,39 +229,12 @@ def generate_post(title: str, snippet: str, url: str, region: str) -> str:
         "ТОЛЬКО факты из источника, длина 200-350 символов.\n"
     )
     try:
-        resp = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=512,
-            temperature=0.6,
-        )
-        text = resp.choices[0].message.content.strip()
+        text = _call_llm(prompt)
         if not text.startswith(region_header):
             text = f"{region_header}\n\n{text}"
         return f"{text}\n\n{url}"
     except Exception as e:
-        err_str = str(e)
-        print(f"  Groq error: {err_str[:120]}")
-        # Если лимит токенов — ждём и пробуем ещё раз
-        if "rate_limit_exceeded" in err_str or "429" in err_str:
-            import re
-            wait = re.search(r"try again in (\d+)m", err_str)
-            wait_sec = int(wait.group(1)) * 60 + 30 if wait else 180
-            print(f"  Rate limit — жду {wait_sec}s...")
-            time.sleep(wait_sec)
-            try:
-                resp2 = groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=400,
-                    temperature=0.6,
-                )
-                text2 = resp2.choices[0].message.content.strip()
-                if not text2.startswith(region_header):
-                    text2 = f"{region_header}\n\n{text2}"
-                return f"{text2}\n\n{url}"
-            except Exception as e2:
-                print(f"  Retry failed: {e2}")
+        print(f"  Generation failed: {e}")
         return None
 
 
