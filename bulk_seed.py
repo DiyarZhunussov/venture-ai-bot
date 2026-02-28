@@ -50,21 +50,31 @@ SEARCH_DAYS  = 90    # смотрим на 90 дней назад
 # ПОИСКОВЫЕ ЗАПРОСЫ ДЛЯ АРХИВА (расширенные)
 # ────────────────────────────────────────────────
 ARCHIVE_QUERIES = [
-    # Казахстан
-    {"query": "Kazakhstan startup funding 2025 2026",       "region": "Kazakhstan"},
-    {"query": "Казахстан стартап инвестиции раунд 2025",    "region": "Kazakhstan"},
-    {"query": "Kazakhstan venture capital investment round", "region": "Kazakhstan"},
-    {"query": "Astana Hub startup investment 2025",         "region": "Kazakhstan"},
-    {"query": "Kazakhstan AI startup unicorn 2025",         "region": "Kazakhstan"},
-    # Центральная Азия
-    {"query": "Uzbekistan startup funding 2025",            "region": "CentralAsia"},
-    {"query": "Central Asia venture capital 2025",          "region": "CentralAsia"},
-    {"query": "Узбекистан стартап инвестиции 2025",         "region": "CentralAsia"},
-    {"query": "Kyrgyzstan Tajikistan startup investment",   "region": "CentralAsia"},
-    # Мировые (для few-shot стиля)
-    {"query": "AI startup raised million series seed 2025", "region": "World"},
-    {"query": "fintech startup funding round 2025",         "region": "World"},
-    {"query": "venture capital investment startup 2025",    "region": "World"},
+    # Казахстан — новые темы
+    {"query": "Казахстан технологии раунд инвестиции 2026",         "region": "Kazakhstan"},
+    {"query": "Kazakhstan fintech startup raised 2025",              "region": "Kazakhstan"},
+    {"query": "Kazakhstan edtech healthtech startup 2025",           "region": "Kazakhstan"},
+    {"query": "AIFC Almaty startup investment deal 2025",            "region": "Kazakhstan"},
+    {"query": "Казахстан IPO выход биржа стартап 2025 2026",         "region": "Kazakhstan"},
+    {"query": "Kazakhstan accelerator batch graduates 2025",         "region": "Kazakhstan"},
+    {"query": "Казахстан раунд A B seed pre-seed 2025",              "region": "Kazakhstan"},
+    {"query": "QazTech Almaty startup ecosystem news 2025",          "region": "Kazakhstan"},
+    # Центральная Азия — новые темы
+    {"query": "Uzbekistan fintech investment round 2025 2026",       "region": "CentralAsia"},
+    {"query": "Узбекистан юникорн единорог стартап 2025",            "region": "CentralAsia"},
+    {"query": "Uzbekistan IT Park startup funding deal",             "region": "CentralAsia"},
+    {"query": "Central Asia startup exit acquisition 2025",          "region": "CentralAsia"},
+    {"query": "Казахстан Узбекистан стартап сделка раунд 2026",      "region": "CentralAsia"},
+    {"query": "Kyrgyzstan startup raised investment 2025",           "region": "CentralAsia"},
+    {"query": "Tajikistan Turkmenistan startup tech 2025",           "region": "CentralAsia"},
+    # Мировые — конкретные свежие сделки
+    {"query": "biotech startup series A raised million 2026",        "region": "World"},
+    {"query": "climate tech startup funding round 2026",             "region": "World"},
+    {"query": "deeptech robotics startup raised 2025 2026",          "region": "World"},
+    {"query": "SaaS B2B startup seed round closed 2026",             "region": "World"},
+    {"query": "healthtech medtech startup funding 2026",             "region": "World"},
+    {"query": "crypto web3 startup raised million 2026",             "region": "World"},
+    {"query": "spacetech defense startup raised 2025 2026",          "region": "World"},
 ]
 
 REGION_HEADER = {
@@ -85,12 +95,11 @@ BLOCKED_DOMAINS = [
     "wikipedia.org", "pitchbook.com", "statista.com",
 ]
 
-# Заголовки содержащие эти слова — пропускаем (списки, дайджесты, рейтинги)
+# Заголовки содержащие эти слова — пропускаем (явные списки и дайджесты)
 SKIP_TITLE_PATTERNS = [
-    "top ", "55 ", "17 ", "10 ", "35 ", "1700+", "40 ", "21 ",
-    "list of", "rankings", "investors in", "firms in",
+    "list of", "[pdf]", ".pptx", "accelerator - guide",
     "venture capital firms", "startup investors",
-    "pdf", ".pptx", "accelerator - guide",
+    "top venture capital", "top vc ",
 ]
 
 # ────────────────────────────────────────────────
