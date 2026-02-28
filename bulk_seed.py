@@ -55,7 +55,7 @@ ARCHIVE_QUERIES = [
     {"query": "Казахстан стартап инвестиции раунд 2025",    "region": "Kazakhstan"},
     {"query": "Kazakhstan venture capital investment round", "region": "Kazakhstan"},
     {"query": "Astana Hub startup investment 2025",         "region": "Kazakhstan"},
-    {"query": "Higgsfield AI Kazakhstan funding",           "region": "Kazakhstan"},
+    {"query": "Kazakhstan AI startup unicorn 2025",         "region": "Kazakhstan"},
     # Центральная Азия
     {"query": "Uzbekistan startup funding 2025",            "region": "CentralAsia"},
     {"query": "Central Asia venture capital 2025",          "region": "CentralAsia"},
@@ -83,6 +83,14 @@ BLOCKED_DOMAINS = [
     "crunchbase.com", "tracxn.com", "instagram.com", "facebook.com",
     "linkedin.com", "twitter.com", "youtube.com", "t.me",
     "wikipedia.org", "pitchbook.com", "statista.com",
+]
+
+# Заголовки содержащие эти слова — пропускаем (списки, дайджесты, рейтинги)
+SKIP_TITLE_PATTERNS = [
+    "top ", "55 ", "17 ", "10 ", "35 ", "1700+", "40 ", "21 ",
+    "list of", "rankings", "investors in", "firms in",
+    "venture capital firms", "startup investors",
+    "pdf", ".pptx", "accelerator - guide",
 ]
 
 # ────────────────────────────────────────────────
@@ -158,7 +166,28 @@ def generate_post(title: str, snippet: str, url: str, region: str) -> str:
             text = f"{region_header}\n\n{text}"
         return f"{text}\n\n{url}"
     except Exception as e:
-        print(f"  Groq error: {e}")
+        err_str = str(e)
+        print(f"  Groq error: {err_str[:120]}")
+        # Если лимит токенов — ждём и пробуем ещё раз
+        if "rate_limit_exceeded" in err_str or "429" in err_str:
+            import re
+            wait = re.search(r"try again in (\d+)m", err_str)
+            wait_sec = int(wait.group(1)) * 60 + 30 if wait else 180
+            print(f"  Rate limit — жду {wait_sec}s...")
+            time.sleep(wait_sec)
+            try:
+                resp2 = groq_client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=400,
+                    temperature=0.6,
+                )
+                text2 = resp2.choices[0].message.content.strip()
+                if not text2.startswith(region_header):
+                    text2 = f"{region_header}\n\n{text2}"
+                return f"{text2}\n\n{url}"
+            except Exception as e2:
+                print(f"  Retry failed: {e2}")
         return None
 
 
@@ -191,6 +220,8 @@ def main():
     all_articles = []
     seen_urls    = set()
 
+    seen_title_keys = set()  # дедупликация по теме (не только по URL)
+
     for search in ARCHIVE_QUERIES:
         print(f"\nSearching: {search['query'][:60]}")
         try:
@@ -208,13 +239,35 @@ def main():
                     continue
                 title   = r.get("title", "").strip()
                 snippet = r.get("content", "")[:500]
-                content = (title + " " + snippet).lower()
-                if not any(kw in content for kw in VC_KEYWORDS):
+                combined = (title + " " + snippet).lower()
+
+                # Фильтр списков и дайджестов
+                if any(pat in title.lower() for pat in SKIP_TITLE_PATTERNS):
+                    print(f"  Skip (list/digest): {title[:60]}")
                     continue
+
+                # Фильтр VC-релевантности
+                if not any(kw in combined for kw in VC_KEYWORDS):
+                    continue
+
+                # Дедупликация по теме: берём 3 ключевых слова из заголовка
+                title_words = [w for w in title.lower().split()
+                               if len(w) > 4 and w not in
+                               {"startup","стартап","raises","привлёк","привлек",
+                                "funding","venture","capital","from","that","with",
+                                "казахстан","kazakhstan","узбекистан","uzbekistan"}]
+                title_key = " ".join(sorted(title_words[:3]))
+                if title_key and title_key in seen_title_keys:
+                    print(f"  Skip (duplicate topic): {title[:60]}")
+                    continue
+
                 if is_already_in_db(url):
                     print(f"  Already in DB: {url[:60]}")
                     continue
+
                 seen_urls.add(url)
+                if title_key:
+                    seen_title_keys.add(title_key)
                 all_articles.append({
                     "title":   title,
                     "url":     url,
@@ -275,7 +328,7 @@ def main():
         f"✅ Bulk seed завершён!\n"
         f"Сгенерировано: {generated} постов\n"
         f"Ошибок: {failed}\n\n"
-        f"Напиши /bulk чтобы начать ревью — посты придут по 10 штук с кнопками."
+        f"Напиши /bulk чтобы начать ревью — каждый пост придёт отдельно с кнопками фидбэка."
     )
 
 
