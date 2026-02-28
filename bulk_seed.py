@@ -174,7 +174,7 @@ def _call_llm(prompt: str) -> str:
     if groq_client:
         try:
             resp = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="meta-llama/llama-4-maverick-17b-128e-instruct",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=400,
                 temperature=0.6,
