@@ -65,7 +65,9 @@ else:
     print("ERROR: нет генератора")
     sys.exit(1)
 
-TARGET_COUNT = 100   # сколько постов сгенерировать
+TARGET_COUNT = 30    # 30 постов за раз — не выедает дневной лимит Groq (100k токенов)
+                     # Запускай 3 раза в разные дни чтобы получить 90 постов
+                     # Каждый запуск добавляет посты в очередь, /bulk показывает все накопленные
 SEARCH_DAYS  = 90    # смотрим на 90 дней назад
 
 # ────────────────────────────────────────────────
@@ -174,7 +176,7 @@ def _call_llm(prompt: str) -> str:
     if groq_client:
         try:
             resp = groq_client.chat.completions.create(
-                model="meta-llama/llama-4-maverick-17b-128e-instruct",
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=400,
                 temperature=0.6,
@@ -190,7 +192,7 @@ def _call_llm(prompt: str) -> str:
                 time.sleep(wait_sec)
                 try:
                     resp2 = groq_client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
+                        model="meta-llama/llama-4-scout-17b-16e-instruct",
                         messages=[{"role": "user", "content": prompt}],
                         max_tokens=400,
                         temperature=0.6,
