@@ -8,11 +8,17 @@ from groq import Groq
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 from tavily import TavilyClient
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
 
 # ────────────────────────────────────────────────
 # ENVIRONMENT VARIABLES
 # ────────────────────────────────────────────────
 GROQ_API_KEY                = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY              = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN          = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID            = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_ADMIN_ID           = os.getenv("TELEGRAM_ADMIN_ID")
@@ -26,8 +32,12 @@ POST_TYPE                   = os.getenv("POST_TYPE", "news")
 NEWS_THREAD_ID      = os.getenv("TELEGRAM_NEWS_THREAD_ID")
 EDUCATION_THREAD_ID = os.getenv("TELEGRAM_EDUCATION_THREAD_ID")
 
-if not all([GROQ_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SUPABASE_URL, SUPABASE_KEY]):
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SUPABASE_URL, SUPABASE_KEY]):
     print("Missing required environment variables.")
+    sys.exit(1)
+
+if not GROQ_API_KEY and not GEMINI_API_KEY:
+    print("Need either GROQ_API_KEY or GEMINI_API_KEY")
     sys.exit(1)
 
 if not TAVILY_API_KEY:
@@ -36,13 +46,20 @@ if not TAVILY_API_KEY:
 # ────────────────────────────────────────────────
 # INITIALIZATION
 # ────────────────────────────────────────────────
-groq_client  = Groq(api_key=GROQ_API_KEY)
+groq_client  = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-# bot используется только для send_to_channel (публикация фото в канал)
-# notify_recipients и notify_approval идут через _tg_post — sync requests.post
-# это избегает зависаний httpx в GitHub Actions (Timed out)
 bot          = Bot(token=TELEGRAM_BOT_TOKEN)
 tavily       = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
+
+# Gemini — основной генератор (нет дневного лимита токенов)
+# Groq — fallback если Gemini недоступен
+_gemini_model = None
+if GEMINI_AVAILABLE and GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    _gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+    print("LLM: Gemini 1.5 Flash (основной) + Groq (fallback)")
+else:
+    print("LLM: Groq LLaMA only")
 
 
 def _tg_post(chat_id: str, text: str, reply_markup_dict: dict = None) -> bool:
@@ -82,16 +99,35 @@ def make_approval_keyboard(pending_id: str) -> InlineKeyboardMarkup:
     ])
 
 # ────────────────────────────────────────────────
-# GROQ LLM WRAPPER
+# LLM WRAPPER — Gemini первым, Groq как fallback
 # ────────────────────────────────────────────────
 def gemini_generate(prompt: str) -> str:
-    response = groq_client.chat.completions.create(
-        model="meta-llama/llama-4-maverick-17b-128e-instruct",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=1024,
-        temperature=0.7,
-    )
-    return response.choices[0].message.content.strip()
+    """Gemini 1.5 Flash основной, Groq LLaMA запасной."""
+    # Пробуем Gemini
+    if _gemini_model:
+        try:
+            resp = _gemini_model.generate_content(prompt)
+            return resp.text.strip()
+        except Exception as e:
+            print(f"Gemini error — fallback to Groq: {e}")
+
+    # Fallback: Groq
+    if groq_client:
+        try:
+            response = groq_client.chat.completions.create(
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1024,
+                temperature=0.7,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            err = str(e)
+            if "rate_limit_exceeded" in err or "429" in err:
+                print(f"Groq error (обучение): {err[:200]}")
+            raise
+
+    raise RuntimeError("Нет доступного LLM генератора")
 
 # ────────────────────────────────────────────────
 # NOTIFY RECIPIENTS
