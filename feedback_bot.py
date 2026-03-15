@@ -1479,11 +1479,16 @@ if __name__ == "__main__":
     ensure_bot_state_table()
     print("bot_state table: OK")
 
-    app = (
-        ApplicationBuilder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .build()
-    )
+    # Пробуем включить JobQueue (нужен APScheduler)
+    try:
+        from telegram.ext import JobQueue
+        builder = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).job_queue(JobQueue())
+        print("JobQueue: включён")
+    except Exception as e:
+        builder = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN)
+        print(f"JobQueue: недоступен ({e})")
+
+    app = builder.build()
 
     # Commands
     app.add_handler(CommandHandler("start",    start))
